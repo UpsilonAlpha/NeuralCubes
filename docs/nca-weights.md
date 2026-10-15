@@ -26,7 +26,11 @@ reads a JSON file with this shape:
 | `alive_threshold` | A cell survives only if some cell in its 3x3x3 block has alpha above this, before and after the update. |
 | `grid` | Edge of the training grid (optional). The viewer opens at this size. |
 | `seed` | Seed cell as `[z, y, x]` in the training grid (optional, defaults to the center). Seeds get alpha and hidden channels set to 1. |
-| `w1` | `H x 4C`, row-major. |
+| `seed_state` | Full `C`-vector for the seed cell (optional). Default: alpha and hidden 1, RGB 0. |
+| `kernels` | Perception kernels, each 27 values indexed `[dz][dy][dx]` (optional, default identity + Sobel/32). |
+| `feature_order` | `kernel_major` (default, `k*C + c`) or `channel_major` (`c*K + k`, PyTorch grouped conv). |
+| `boundary` | `wrap` (default, torus) or `zero` (PyTorch `padding=1`). |
+| `w1` | `H x K*C`, row-major (`K` = number of kernels). |
 | `b1` | `H`. |
 | `w2` | `C x H`, row-major. |
 | `b2` | `C`. |
@@ -49,30 +53,12 @@ Axes: the grid is stored `[z][y][x]` and y is up in the viewer. In a PyTorch
 
 ## Exporting from PyTorch
 
-Most growing-NCA notebooks perceive with a grouped convolution, which orders features
-**channel-major** (`feature[c * 4 + k]`). Reorder the columns of the first layer when
-exporting:
+For the "Minimalist Neural Cellular Automata" notebook, use
+`training/export_torch_notebook.py`: paste it into a cell and call
+`export_nca(results['final_model'], 'bunny.json', grid_shape=data['y'].shape[-3:])`.
+It copies the kernels straight from the frozen perception conv and sets
+`feature_order: channel_major`, `boundary: zero` and an all-ones seed, so the engine
+reproduces the notebook's update. `crates/nc-core` tests this against a NumPy
+re-implementation of the notebook's step (`training/make_torch_fixture.py`).
 
-```python
-import json, numpy as np
-
-C, H = 16, 64
-w1 = model.w1.weight.detach().cpu().numpy().reshape(H, C, 4)   # channel-major
-w1 = w1.transpose(0, 2, 1).reshape(H, 4 * C)                   # to kernel-major
-w2 = model.w2.weight.detach().cpu().numpy().reshape(C, H)
-b1 = model.w1.bias.detach().cpu().numpy()
-b2 = (model.w2.bias.detach().cpu().numpy() if model.w2.bias is not None else np.zeros(C))
-
-json.dump({
-    "format": "neural-cubes-nca/1", "name": "my-model",
-    "channels": C, "hidden": H, "fire_rate": 0.5, "alive_threshold": 0.1,
-    "grid": 32, "seed": [16, 16, 16],
-    "w1": w1.ravel().tolist(), "b1": b1.tolist(),
-    "w2": w2.ravel().tolist(), "b2": b2.tolist(),
-}, open("my-model.json", "w"))
-```
-
-Check that the Sobel kernels, their order, their scaling and the padding mode (this
-engine wraps) match the notebook. If they differ, the model will still run but won't
-grow the shape it learned. `training/make_fixture.py` shows how the Rust test checks a
-single step against the training code; the same idea works for a PyTorch model.
+Tensor axes `(D, H, W)` map to the engine's `(z, y, x)`, with y up in the viewer.

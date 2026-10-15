@@ -2,20 +2,23 @@
 //! network maps what a cell perceives in its 3x3x3 block to an update.
 //!
 //! The architecture is the 3D version of "Growing Neural Cellular Automata"
-//! (Mordvintsev et al., 2020) and matches `training/train_nca.py`:
+//! (Mordvintsev et al., 2020):
 //!
-//! 1. Perception: for each channel, the identity and 3D Sobel gradients along x, y and z,
-//!    giving `4 * C` features ordered kernel-major (`feature[k * C + c]`).
+//! 1. Perception: every channel is convolved with `K` fixed 3x3x3 kernels (by default
+//!    the identity and Sobel x/y/z), giving `K * C` features.
 //! 2. Update: `delta = W2 · relu(W1 · features + b1) + b2`.
 //! 3. Stochastic firing: each cell applies its update with probability `fire_rate`.
 //! 4. Alive masking: a cell is kept only if some cell in its 3x3x3 block has
 //!    alpha (channel 3) above `alive_threshold`, both before and after the update.
 //!
-//! Channels 0..3 are premultiplied RGB, channel 3 is alpha, the rest are hidden state.
+//! Channels 0..3 are RGB, channel 3 is alpha, the rest are hidden state. The kernels,
+//! feature order, boundary and seed are all read from the weights file, so models from
+//! different training code (`training/train_nca.py`, PyTorch notebooks) run unchanged.
+//! See `docs/nca-weights.md`.
 
 use super::ParseError;
-use crate::grid::Grid;
-use crate::neighborhood::{Neighborhood, Neighbors};
+use crate::grid::{Dims, Grid};
+use crate::neighborhood::{Neighborhood, Neighbors, BLOCK_OFFSETS, CENTER};
 use crate::rng::Rng;
 use crate::rule::{Rule, StepContext};
 use crate::sim::Seeding;
@@ -26,7 +29,29 @@ pub const ALPHA: usize = 3;
 /// Cells at or above this alpha are drawn and count as solid for raycasting.
 pub const VISIBLE_ALPHA: f32 = 0.2;
 
-/// Trained weights and settings, as exported by `training/train_nca.py`.
+/// How perception features are laid out in the input of the first layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureOrder {
+    /// `feature[k * C + c]`: all channels for kernel 0, then kernel 1, ...
+    #[default]
+    KernelMajor,
+    /// `feature[c * K + k]`: what a PyTorch grouped `Conv3d(C, K*C, groups=C)` produces.
+    ChannelMajor,
+}
+
+/// What lies beyond the grid edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Boundary {
+    /// The grid is a torus (`padding_mode="circular"`).
+    #[default]
+    Wrap,
+    /// Empty cells (PyTorch's default `padding=1`).
+    Zero,
+}
+
+/// Trained weights and settings. See `docs/nca-weights.md` for the file format.
 #[derive(Clone, Debug, Deserialize)]
 pub struct NcaWeights {
     #[serde(default)]
@@ -37,9 +62,17 @@ pub struct NcaWeights {
     pub alive_threshold: f32,
     /// Grid edge the model was trained on.
     pub grid: Option<usize>,
-    /// Seed cell `[z, y, x]` in the training grid.
+    /// Seed cell `[z, y, x]` in the training grid; defaults to the center.
     pub seed: Option<[usize; 3]>,
-    /// `hidden x 4*channels`, row-major.
+    /// Full state of the seed cell; defaults to 1 for alpha and hidden channels, 0 for RGB.
+    pub seed_state: Option<Vec<f32>>,
+    /// Perception kernels, 27 values each indexed `[dz][dy][dx]`. Defaults to identity + Sobel.
+    pub kernels: Option<Vec<Vec<f32>>>,
+    #[serde(default)]
+    pub feature_order: FeatureOrder,
+    #[serde(default)]
+    pub boundary: Boundary,
+    /// `hidden x (kernels * channels)`, row-major.
     pub w1: Vec<f32>,
     pub b1: Vec<f32>,
     /// `channels x hidden`, row-major.
@@ -50,28 +83,41 @@ pub struct NcaWeights {
 impl NcaWeights {
     pub fn from_json(json: &str) -> Result<Self, ParseError> {
         let w: Self = serde_json::from_str(json).map_err(|e| ParseError(format!("bad NCA weights: {e}")))?;
-        let (c, h) = (w.channels, w.hidden);
-        let checks = [("w1", w.w1.len(), h * 4 * c), ("b1", w.b1.len(), h), ("w2", w.w2.len(), c * h), ("b2", w.b2.len(), c)];
+        let (c, h, k) = (w.channels, w.hidden, w.kernel_count());
+        let checks = [
+            ("w1", w.w1.len(), h * k * c),
+            ("b1", w.b1.len(), h),
+            ("w2", w.w2.len(), c * h),
+            ("b2", w.b2.len(), c),
+            ("seed_state", w.seed_state.as_ref().map_or(c, Vec::len), c),
+        ];
         for (name, got, want) in checks {
             if got != want {
                 return Err(ParseError(format!("NCA weights: `{name}` has {got} values, expected {want}")));
             }
+        }
+        if let Some(bad) = w.kernels.iter().flatten().find(|k| k.len() != 27) {
+            return Err(ParseError(format!("NCA weights: kernels need 27 values each, got {}", bad.len())));
         }
         if c <= ALPHA {
             return Err(ParseError(format!("NCA needs at least {} channels, got {c}", ALPHA + 1)));
         }
         Ok(w)
     }
+
+    fn kernel_count(&self) -> usize {
+        self.kernels.as_ref().map_or(4, Vec::len)
+    }
 }
 
-/// Identity and Sobel x/y/z kernels over the 3x3x3 block, in block order.
-fn kernels() -> [[f32; 27]; 4] {
+/// Identity and Sobel x/y/z kernels (scaled by 1/32), in block order.
+pub fn default_kernels() -> Vec<[f32; 27]> {
     let d = [-1.0, 0.0, 1.0];
     let s = [1.0, 2.0, 1.0];
-    let mut k = [[0.0f32; 27]; 4];
-    for (i, off) in crate::neighborhood::BLOCK_OFFSETS.iter().enumerate() {
+    let mut k = vec![[0.0f32; 27]; 4];
+    for (i, off) in BLOCK_OFFSETS.iter().enumerate() {
         let [x, y, z] = off.map(|o| (o + 1) as usize);
-        k[0][i] = if i == crate::neighborhood::CENTER { 1.0 } else { 0.0 };
+        k[0][i] = if i == CENTER { 1.0 } else { 0.0 };
         k[1][i] = d[x] * s[y] * s[z] / 32.0;
         k[2][i] = s[x] * d[y] * s[z] / 32.0;
         k[3][i] = s[x] * s[y] * d[z] / 32.0;
@@ -83,7 +129,9 @@ fn kernels() -> [[f32; 27]; 4] {
 #[derive(Clone, Debug)]
 pub struct NeuralCa<const C: usize> {
     pub weights: NcaWeights,
-    kernels: [[f32; 27]; 4],
+    /// Nonzero taps of each kernel as `(block index, weight)`.
+    taps: Vec<Vec<(usize, f32)>>,
+    seed: [f32; C],
 }
 
 impl<const C: usize> NeuralCa<C>
@@ -94,34 +142,68 @@ where
         if weights.channels != C {
             return Err(ParseError(format!("weights have {} channels, expected {C}", weights.channels)));
         }
-        Ok(Self { weights, kernels: kernels() })
+        // Kernels in the file are indexed [dz][dy][dx], which is exactly block order.
+        let kernels: Vec<[f32; 27]> = match &weights.kernels {
+            Some(ks) => ks.iter().map(|k| std::array::from_fn(|i| k[i])).collect(),
+            None => default_kernels(),
+        };
+        let taps = kernels
+            .iter()
+            .map(|k| k.iter().enumerate().filter(|(_, w)| **w != 0.0).map(|(i, w)| (i, *w)).collect())
+            .collect();
+        let seed = match &weights.seed_state {
+            Some(s) => std::array::from_fn(|c| s[c]),
+            None => std::array::from_fn(|c| if c >= ALPHA { 1.0 } else { 0.0 }),
+        };
+        Ok(Self { weights, taps, seed })
     }
 
-    /// The state a seed cell starts in: alpha and hidden channels at 1, color at 0.
-    pub fn seed_state() -> [f32; C] {
-        std::array::from_fn(|c| if c >= ALPHA { 1.0 } else { 0.0 })
+    /// The state a seed cell starts in.
+    pub fn seed_state(&self) -> [f32; C] {
+        self.seed
+    }
+
+    /// The 3x3x3 block around `(x, y, z)`, honoring the boundary mode.
+    fn block(&self, grid: &Grid<[f32; C]>, ctx: &StepContext, x: usize, y: usize, z: usize) -> [[f32; C]; 27] {
+        let d = grid.dims();
+        let interior = x > 0 && y > 0 && z > 0 && x + 1 < d.x && y + 1 < d.y && z + 1 < d.z;
+        if interior || self.weights.boundary == Boundary::Wrap {
+            return ctx.neighbors(grid, Neighborhood::Moore, x, y, z).block();
+        }
+        std::array::from_fn(|i| {
+            let [dx, dy, dz] = BLOCK_OFFSETS[i].map(isize::from);
+            let (nx, ny, nz) = (x as isize + dx, y as isize + dy, z as isize + dz);
+            let inside = |v: isize, n: usize| v >= 0 && v < n as isize;
+            if inside(nx, d.x) && inside(ny, d.y) && inside(nz, d.z) {
+                grid.get(nx as usize, ny as usize, nz as usize)
+            } else {
+                [0.0; C]
+            }
+        })
     }
 
     fn update(&self, block: &[[f32; C]; 27], feats: &mut [f32], hidden: &mut [f32]) -> [f32; C] {
         let w = &self.weights;
-        for (k, kernel) in self.kernels.iter().enumerate() {
-            let f = &mut feats[k * C..(k + 1) * C];
-            f.fill(0.0);
-            for (j, &kw) in kernel.iter().enumerate() {
-                if kw != 0.0 {
-                    for c in 0..C {
-                        f[c] += kw * block[j][c];
-                    }
+        let kn = self.taps.len();
+        feats.fill(0.0);
+        for (k, taps) in self.taps.iter().enumerate() {
+            for &(j, kw) in taps {
+                for c in 0..C {
+                    let f = match w.feature_order {
+                        FeatureOrder::KernelMajor => k * C + c,
+                        FeatureOrder::ChannelMajor => c * kn + k,
+                    };
+                    feats[f] += kw * block[j][c];
                 }
             }
         }
-        let n = 4 * C;
+        let n = kn * C;
         for (h, out) in hidden.iter_mut().enumerate() {
             let row = &w.w1[h * n..(h + 1) * n];
             let v = w.b1[h] + row.iter().zip(feats.iter()).map(|(a, b)| a * b).sum::<f32>();
             *out = v.max(0.0);
         }
-        let mut cell = block[crate::neighborhood::CENTER];
+        let mut cell = block[CENTER];
         for (c, v) in cell.iter_mut().enumerate() {
             let row = &w.w2[c * w.hidden..(c + 1) * w.hidden];
             *v += w.b2[c] + row.iter().zip(hidden.iter()).map(|(a, b)| a * b).sum::<f32>();
@@ -130,25 +212,39 @@ where
     }
 
     /// Which cells have an alpha above the threshold somewhere in their 3x3x3 block.
-    fn alive_mask(&self, grid: &Grid<[f32; C]>, ctx: &StepContext) -> Vec<bool> {
+    fn alive_mask(&self, grid: &Grid<[f32; C]>) -> Vec<bool> {
         let d = grid.dims();
         let thr = self.weights.alive_threshold;
-        let mut own = vec![false; d.len()];
-        for (o, c) in own.iter_mut().zip(grid.cells()) {
-            *o = c[ALPHA] > thr;
-        }
+        let own: Vec<bool> = grid.cells().iter().map(|c| c[ALPHA] > thr).collect();
         let mut out = vec![false; d.len()];
         let mut i = 0;
         for z in 0..d.z {
             for y in 0..d.y {
                 for x in 0..d.x {
-                    let n = ctx.neighbors(grid, Neighborhood::Moore, x, y, z);
-                    out[i] = own[i] || n.iter().any(|c| c[ALPHA] > thr);
+                    out[i] = self.block_any(&own, d, x, y, z);
                     i += 1;
                 }
             }
         }
         out
+    }
+
+    fn block_any(&self, own: &[bool], d: Dims, x: usize, y: usize, z: usize) -> bool {
+        if own[d.index(x, y, z)] {
+            return true;
+        }
+        let wrap = self.weights.boundary == Boundary::Wrap;
+        BLOCK_OFFSETS.iter().any(|o| {
+            let [dx, dy, dz] = o.map(isize::from);
+            let (nx, ny, nz) = (x as isize + dx, y as isize + dy, z as isize + dz);
+            if wrap {
+                let (a, b, c) = d.wrap(nx, ny, nz);
+                own[d.index(a, b, c)]
+            } else {
+                let inside = |v: isize, n: usize| v >= 0 && v < n as isize;
+                inside(nx, d.x) && inside(ny, d.y) && inside(nz, d.z) && own[d.index(nx as usize, ny as usize, nz as usize)]
+            }
+        })
     }
 }
 
@@ -176,16 +272,16 @@ where
         Neighborhood::Moore
     }
 
-    /// Deterministic (always-firing, unmasked) single-cell update. The real step is
-    /// [`Rule::step`], which adds stochastic firing and alive masking.
+    /// Deterministic (always-firing, unmasked, wrapping) single-cell update. The real
+    /// step is [`Rule::step`], which adds stochastic firing, masking and the boundary mode.
     fn next(&self, _cell: Self::Cell, n: &Neighbors<'_, Self::Cell>) -> Self::Cell {
-        let mut feats = vec![0.0; 4 * C];
+        let mut feats = vec![0.0; self.taps.len() * C];
         let mut hidden = vec![0.0; self.weights.hidden];
         self.update(&n.block(), &mut feats, &mut hidden)
     }
 
     fn seed_cell(&self, _rng: &mut Rng) -> Self::Cell {
-        Self::seed_state()
+        self.seed
     }
 
     fn shade(&self, cell: Self::Cell) -> Option<f32> {
@@ -210,7 +306,7 @@ where
             count += 1.0;
         }
         if count == 0.0 {
-            return Self::seed_state();
+            return self.seed;
         }
         let mut cell = sum.map(|s| s / count);
         cell[ALPHA] = cell[ALPHA].max(1.0);
@@ -223,13 +319,13 @@ where
         let train = self.weights.grid.unwrap_or(d.x);
         let [sz, sy, sx] = self.weights.seed.unwrap_or([train / 2; 3]);
         let shift = |v: usize, n: usize| (v as isize + (n as isize - train as isize) / 2).clamp(0, n as isize - 1) as usize;
-        grid.set(shift(sx, d.x), shift(sy, d.y), shift(sz, d.z), Self::seed_state());
+        grid.set(shift(sx, d.x), shift(sy, d.y), shift(sz, d.z), self.seed);
     }
 
     fn step(&self, src: &Grid<Self::Cell>, dst: &mut Grid<Self::Cell>, ctx: &StepContext) {
         let d = src.dims();
-        let pre = self.alive_mask(src, ctx);
-        let mut feats = vec![0.0; 4 * C];
+        let pre = self.alive_mask(src);
+        let mut feats = vec![0.0; self.taps.len() * C];
         let mut hidden = vec![0.0; self.weights.hidden];
         {
             let out = dst.cells_mut();
@@ -240,8 +336,7 @@ where
                         out[i] = if !pre[i] {
                             [0.0; C]
                         } else if fires(ctx.generation, i, self.weights.fire_rate) {
-                            let n = ctx.neighbors(src, Neighborhood::Moore, x, y, z);
-                            self.update(&n.block(), &mut feats, &mut hidden)
+                            self.update(&self.block(src, ctx, x, y, z), &mut feats, &mut hidden)
                         } else {
                             src.cells()[i]
                         };
@@ -250,7 +345,7 @@ where
                 }
             }
         }
-        let post = self.alive_mask(dst, ctx);
+        let post = self.alive_mask(dst);
         for ((cell, a), b) in dst.cells_mut().iter_mut().zip(&pre).zip(&post) {
             if !(*a && *b) {
                 *cell = [0.0; C];

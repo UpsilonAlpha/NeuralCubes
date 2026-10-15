@@ -196,4 +196,28 @@ mod tests {
         assert!(worst < 1e-4, "max difference {worst}");
         assert!(sim.population() > 0);
     }
+
+    /// Same check against a NumPy re-implementation of the PyTorch notebook's model
+    /// (`training/make_torch_fixture.py`): custom kernels, channel-major features, zero boundary.
+    #[test]
+    fn neural_step_matches_pytorch_notebook_layout() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            size: usize,
+            weights: serde_json::Value,
+            input: Vec<f32>,
+            output: Vec<f32>,
+        }
+        let f: Fixture = serde_json::from_str(include_str!("../tests/fixtures/nca_torch_step.json")).unwrap();
+        let w = rules::NcaWeights::from_json(&f.weights.to_string()).unwrap();
+        let mut sim = Simulation::new(rules::NeuralCa::<16>::new(w).unwrap(), Dims::cube(f.size));
+        for (cell, chunk) in sim.grid_mut().cells_mut().iter_mut().zip(f.input.chunks(16)) {
+            cell.copy_from_slice(chunk);
+        }
+        sim.step();
+        let got: Vec<f32> = sim.grid().cells().iter().flatten().copied().collect();
+        let worst = got.iter().zip(&f.output).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst < 1e-4, "max difference {worst}");
+        assert!(sim.population() > 0);
+    }
 }
