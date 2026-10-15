@@ -8,9 +8,9 @@ compiled to WebAssembly and deployed to GitHub Pages.
 ```
 crates/nc-core   simulation core: grids, neighborhoods, the Rule trait, built-in rule families
 crates/nc-web    wasm-bindgen wrapper exposing a `Universe` to JavaScript
-web/             static front end (WebGL2 instanced cubes, no JS dependencies)
+web/             static front end (WebGL2 rendering, WebGPU stepping, no JS dependencies)
 web/models/      trained neural CA weights the viewer can load
-training/        JAX scripts: voxelize a mesh, train a regenerating NCA, export weights
+training/        JAX scripts: build targets, train a regenerating NCA, export weights
 docs/            the neural CA weights format
 .github/         CI: tests, wasm build, Pages deploy
 ```
@@ -47,6 +47,16 @@ The page URL keeps the current rule and size in its hash, e.g.
 - **Orbit / Add / Remove** pick what the cursor does (keys: `1`, `2`, `3`). Add and Remove
   cast a ray from the cursor into the grid, preview the brush, and fill or empty the cells
   it covers. Right-drag always orbits; scroll or pinch zooms.
+- **View: Smooth** draws a marching-cubes surface instead of cubes: from the alpha
+  channel for neural CAs (with colors blended between cells), and from blurred occupancy
+  for the other families.
+- **Orientation** (neural CAs only) turns the model's growth direction. Models trained with
+  `--rotation yaw` hold their shape at any turn; `full` adds tilt and roll. Press Reseed to
+  grow from scratch at the new angle, or change it live and watch the shape rebuild.
+- **Run the model on the GPU** steps neural CAs with a WebGPU compute shader
+  (`web/gpu.js`) when the browser supports it, and falls back to the Rust/wasm CPU path
+  otherwise. Drawing, raycasting and edits always run against the CPU copy; GPU state is
+  read back after each batch of steps and re-uploaded after an edit.
 - **Load neural CA weights** runs any model exported in the [weights format](docs/nca-weights.md).
 
 The "Bunny" preset is a neural CA trained to grow the Stanford bunny from one cell and
@@ -93,17 +103,31 @@ only; training lives in `training/`.
 
 Planned: continuous (Lenia-style) rules.
 
+Any family gets the Smooth view for free: `Rule::density` and `Rule::iso_level` say what
+the surface follows (by default, drawn cells at 0.5).
+
 ## Training a neural CA
 
 ```sh
-pip install jax optax numpy
+pip install -r training/requirements.txt
 cd training
-python voxelize.py mesh.json --size 24 --fit 21 --out targets/shape.npy   # {"positions", "cells"} mesh
-python train_nca.py targets/shape.npy --out ../web/models/shape.json --iterations 1500
+python targets.py --list                                   # bunny tree mushroom cactus torus
+python train_nca.py tree --size 32 --rotation yaw --out ../web/models/tree.json
+python targets.py mesh model.obj --size 32 --out targets/model32.npy   # any mesh trimesh reads
+python train_nca.py targets/model32.npy --out ../web/models/model.json
 ```
 
-On a 4-core CPU the bundled bunny (24³) takes about 5 s per iteration. Pass `--remat`
-for 32³ and larger grids to save memory; a GPU is much faster for those.
+Training follows [Growing Neural Cellular Automata](https://distill.pub/2020/growing-ca/):
+a pool of samples is grown from the seed, the worst sample in each batch is reset, and the
+best ones are damaged (`--damage`, `--damage-spheres`, `--damage-radius`, `--cut-prob`)
+so the model learns to regrow. `--rotation yaw` or `full` trains each sample at a random
+orientation, with the gradient features expressed in the sample's own frame, so one model
+grows the shape at any angle (the viewer's Orientation slider). `--checkpoint` saves and
+resumes the whole run.
+
+On a 4-core CPU a 24³ grid takes about 5 s per iteration; use a GPU for 32³ and up, and
+`--remat` to save memory. See [training/cluster/README.md](training/cluster/README.md) for
+SLURM jobs.
 
 ## Adding a rule family
 

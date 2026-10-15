@@ -1,0 +1,6 @@
+# CPU: pip install -r requirements.txt
+# NVIDIA GPU: pip install -r requirements.txt "jax[cuda12]"
+jax>=0.4.30
+optax>=0.2
+numpy>=1.24
+trimesh>=4  # only for importing OBJ/PLY/STL/GLB meshes in targets.py

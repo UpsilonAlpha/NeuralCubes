@@ -38,6 +38,10 @@ def export_nca(model, path, name="model", grid_shape=(27, 27, 27), fire_rate=0.5
         "kernels": [k.ravel().tolist() for k in kernels],  # [d][h][w] order, as stored
         "feature_order": "channel_major",    # grouped Conv3d output is c * K + k
         "boundary": "zero",                  # Conv3d(padding=1) pads with zeros
+        # Which kernels are the x, y, z gradients (tensor axes W, H, D), so the viewer can
+        # rotate the model. The notebook's "dz" runs along H and "dy" along D, both flipped.
+        "gradient_kernels": [1, 3, 2],
+        "gradient_signs": [1.0, -1.0, -1.0],
         "w1": as_np(process.weight).reshape(H, K * C).ravel().tolist(),
         "b1": as_np(process.bias).tolist(),
         "w2": as_np(output.weight).reshape(C, H).ravel().tolist(),

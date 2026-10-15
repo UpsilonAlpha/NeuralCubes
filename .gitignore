@@ -1,3 +1,6 @@
 /target
 /web/pkg
 __pycache__/
+/runs/
+/training/runs/
+*.ckpt
