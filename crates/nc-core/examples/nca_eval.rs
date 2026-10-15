@@ -28,7 +28,7 @@ fn main() {
                             [x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5],
                             [1.0, 0.0, 0.0],
                         )
-                        .map_or(false, |h| h.cell == [x, y, z]);
+                        .is_some_and(|h| h.cell == [x, y, z]);
                 }
             }
         }
