@@ -16,7 +16,7 @@ pub use neighborhood::{Neighborhood, Neighbors};
 pub use rng::Rng;
 pub use rule::{Rule, StepContext};
 pub use rules::ParseError;
-pub use sim::{Automaton, Seeding, Simulation};
+pub use sim::{Automaton, Hit, Seeding, Simulation};
 
 /// Builds a simulation from rule notation, choosing the rule family from the notation.
 ///
@@ -28,6 +28,20 @@ pub fn from_notation(notation: &str, dims: Dims) -> Result<Box<dyn Automaton>, P
     } else {
         Box::new(Simulation::new(rules::Generations::parse(notation)?, dims))
     })
+}
+
+/// Builds a neural CA simulation from weights exported by `training/train_nca.py`.
+pub fn from_nca_json(json: &str, dims: Dims) -> Result<Box<dyn Automaton>, ParseError> {
+    let w = rules::NcaWeights::from_json(json)?;
+    macro_rules! build {
+        ($($c:literal),*) => {
+            match w.channels {
+                $($c => Box::new(Simulation::new(rules::NeuralCa::<$c>::new(w)?, dims)) as Box<dyn Automaton>,)*
+                n => return Err(ParseError(format!("unsupported NCA channel count {n}; supported: {:?}", [$($c),*]))),
+            }
+        };
+    }
+    Ok(build!(8, 12, 16, 24, 32))
 }
 
 #[cfg(test)]
@@ -114,7 +128,7 @@ mod tests {
         }
         let mut out = vec![];
         assert_eq!(sim.surface(&mut out), 26);
-        assert_eq!(out.len(), 26 * 4);
+        assert_eq!(out.len(), 26 * 8);
         assert_eq!(sim.population(), 27);
     }
 
@@ -129,8 +143,57 @@ mod tests {
         a.surface(&mut sa);
         b.surface(&mut sb);
         assert_eq!(sa, sb);
-        assert!(sa.chunks(4).all(|c| (5.0..15.0).contains(&c[0]) && (5.0..15.0).contains(&c[2])));
+        assert!(sa.chunks(8).all(|c| (5.0..15.0).contains(&c[0]) && (5.0..15.0).contains(&c[2])));
         let n = a.population() as f32;
         assert!((400.0..600.0).contains(&n), "population {n}");
+    }
+
+    #[test]
+    fn raycast_finds_first_filled_cell_and_face() {
+        let mut sim = Simulation::new(LifeLike::parse("/1/2/M").unwrap(), Dims::cube(8));
+        sim.grid_mut().set(4, 4, 4, true);
+        sim.grid_mut().set(6, 4, 4, true);
+        // From outside along +x through the row y=4, z=4.
+        let hit = sim.raycast([-3.0, 4.5, 4.5], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(hit, Hit { cell: [4, 4, 4], normal: [-1, 0, 0] });
+        // From above, diagonally down onto the top face of (6, 4, 4).
+        let hit = sim.raycast([6.5, 20.0, 4.5], [0.0, -1.0, 0.0]).unwrap();
+        assert_eq!(hit, Hit { cell: [6, 4, 4], normal: [0, 1, 0] });
+        assert_eq!(sim.raycast([-3.0, 1.5, 1.5], [1.0, 0.0, 0.0]), None);
+        assert_eq!(sim.raycast([-3.0, 4.5, 4.5], [-1.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn erase_and_fill_brush() {
+        let mut sim = Simulation::new(Generations::parse("4/4/5/M").unwrap(), Dims::cube(9));
+        assert_eq!(sim.fill([4.5, 4.5, 4.5], 1.0), 7);
+        assert_eq!(sim.population(), 7);
+        assert_eq!(sim.fill([4.5, 4.5, 4.5], 1.0), 0);
+        assert_eq!(sim.erase([4.5, 4.5, 4.5], 0.5), 1);
+        assert_eq!(sim.population(), 6);
+    }
+
+    /// One update with fire rate 1 must match the reference computed by
+    /// `training/make_fixture.py` with the training code.
+    #[test]
+    fn neural_step_matches_training_code() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            size: usize,
+            weights: serde_json::Value,
+            input: Vec<f32>,
+            output: Vec<f32>,
+        }
+        let f: Fixture = serde_json::from_str(include_str!("../tests/fixtures/nca_step.json")).unwrap();
+        let w = rules::NcaWeights::from_json(&f.weights.to_string()).unwrap();
+        let mut sim = Simulation::new(rules::NeuralCa::<8>::new(w).unwrap(), Dims::cube(f.size));
+        for (cell, chunk) in sim.grid_mut().cells_mut().iter_mut().zip(f.input.chunks(8)) {
+            cell.copy_from_slice(chunk);
+        }
+        sim.step();
+        let got: Vec<f32> = sim.grid().cells().iter().flatten().copied().collect();
+        let worst = got.iter().zip(&f.output).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst < 1e-4, "max difference {worst}");
+        assert!(sim.population() > 0);
     }
 }

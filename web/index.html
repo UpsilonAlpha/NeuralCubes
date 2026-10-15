@@ -39,6 +39,12 @@
     button { flex: 1; font: inherit; padding: 7px 8px; border-radius: 6px; cursor: pointer;
       border: 1px solid var(--border); background: var(--bg); color: var(--text); }
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    #seedControls { display: flex; flex-direction: column; gap: 14px; }
+    #seedControls[hidden] { display: none; }
+    .tools button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+    .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+    canvas[data-tool="add"], canvas[data-tool="remove"] { cursor: crosshair; }
+    input[type=file] { font-size: 12px; color: var(--muted); }
     #error { color: var(--error); font-size: 12px; min-height: 1em; margin-top: -8px; }
     details { font-size: 12px; color: var(--muted); }
     details code { color: var(--text); }
@@ -58,7 +64,7 @@
   <aside>
     <div>
       <h1>Neural Cubes</h1>
-      <p>3D cellular automata in Rust + WebAssembly. Drag to orbit, scroll or pinch to zoom.</p>
+      <p>3D cellular automata in Rust + WebAssembly.</p>
     </div>
     <label>Preset
       <select id="preset"></select>
@@ -71,34 +77,50 @@
     </label>
     <div id="error"></div>
     <div class="row">
-      <button id="play" class="primary">Pause</button>
-      <button id="step">Step</button>
+      <button id="play" class="primary" title="Space">Pause</button>
+      <button id="step" title=". (period)">Step</button>
       <button id="reseed">Reseed</button>
     </div>
+    <div>
+      <div class="row tools" role="group" aria-label="Cursor tool">
+        <button data-tool="orbit" title="1">Orbit</button>
+        <button data-tool="add" title="2">Add</button>
+        <button data-tool="remove" title="3">Remove</button>
+      </div>
+      <p id="hint" class="hint"></p>
+    </div>
+    <label><span>Brush <b id="brushOut"></b></span>
+      <input id="brush" type="range" min="0.5" max="5" step="0.5" value="2">
+    </label>
     <label><span>Speed <b id="speedOut"></b></span>
       <input id="speed" type="range" min="1" max="60" value="10">
     </label>
     <label><span>Grid size <b id="sizeOut"></b></span>
       <input id="size" type="range" min="16" max="128" step="8" value="48">
     </label>
+    <div id="seedControls">
     <label><span>Seed extent <b id="extentOut"></b></span>
       <input id="extent" type="range" min="0.02" max="1" step="0.01" value="0.2">
     </label>
     <label><span>Seed density <b id="densityOut"></b></span>
       <input id="density" type="range" min="0.01" max="1" step="0.01" value="0.5">
     </label>
+    </div>
     <label>Color
       <select id="color">
         <option value="0">By state (age)</option>
         <option value="1">By position</option>
       </select>
     </label>
+    <label>Load neural CA weights (.json)
+      <input id="modelFile" type="file" accept=".json,application/json">
+    </label>
     <details>
       <summary>Rule notation</summary>
       <p><code>S/B/C/N</code>: a live cell <b>survives</b> with a neighbor count in S, an empty cell is
       <b>born</b> with a count in B, there are <b>C</b> states (2 is plain alive/dead; more adds decaying
       states), and the neighborhood is <code>M</code> (26 surrounding cells) or <code>N</code> (6 face
-      neighbors). Counts are lists like <code>5-7,12</code>.</p>
+      neighbors). Counts are lists like <code>5-7,12</code>. Neural CA models are named <code>nca:bunny</code>.</p>
     </details>
   </aside>
 </main>

@@ -1,8 +1,9 @@
 //! The extension point: every rule family implements [`Rule`].
 
-use crate::grid::Grid;
+use crate::grid::{Dims, Grid};
 use crate::neighborhood::{Neighborhood, Neighbors, Wrap};
 use crate::rng::Rng;
+use crate::sim::Seeding;
 
 /// A cellular automaton update rule.
 ///
@@ -32,6 +33,37 @@ pub trait Rule: Send + Sync + 'static {
     /// How a cell should be drawn: `None` for empty, otherwise an intensity in `0.0..=1.0`.
     fn shade(&self, cell: Self::Cell) -> Option<f32>;
 
+    /// The cell's own color in linear RGB, for rules whose cells carry one.
+    fn color(&self, _cell: Self::Cell) -> Option<[f32; 3]> {
+        None
+    }
+
+    /// The cell placed when a user adds material at an empty spot.
+    fn added_cell(&self, _neighbors: &Neighbors<'_, Self::Cell>, rng: &mut Rng) -> Self::Cell {
+        self.seed_cell(rng)
+    }
+
+    /// Fills an empty grid with a starting pattern. The default scatters
+    /// [`Rule::seed_cell`] through a centered cube; rules with a fixed seed override it.
+    fn seed_grid(&self, grid: &mut Grid<Self::Cell>, s: Seeding) {
+        let d = grid.dims();
+        let mut rng = Rng::new(s.seed);
+        let span = |n: usize| {
+            let k = ((n as f32 * s.extent.clamp(0.0, 1.0)).round() as usize).clamp(1, n);
+            let lo = (n - k) / 2;
+            lo..lo + k
+        };
+        for z in span(d.z) {
+            for y in span(d.y) {
+                for x in span(d.x) {
+                    if rng.next_f32() < s.density {
+                        grid.set(x, y, z, self.seed_cell(&mut rng));
+                    }
+                }
+            }
+        }
+    }
+
     /// Advances the whole grid by one generation, writing into `dst`.
     fn step(&self, src: &Grid<Self::Cell>, dst: &mut Grid<Self::Cell>, ctx: &StepContext) {
         let d = src.dims();
@@ -50,14 +82,16 @@ pub trait Rule: Send + Sync + 'static {
     }
 }
 
-/// Precomputed data shared across steps for a given grid size.
+/// Data shared across steps for a given grid size.
 pub struct StepContext {
     pub(crate) wrap: Wrap,
+    /// The generation being computed, for rules that need per-step randomness.
+    pub generation: u64,
 }
 
 impl StepContext {
-    pub fn new(dims: crate::Dims) -> Self {
-        Self { wrap: Wrap::new(dims) }
+    pub fn new(dims: Dims) -> Self {
+        Self { wrap: Wrap::new(dims), generation: 0 }
     }
 
     /// Neighbors of `(x, y, z)` in `grid`, for rules that override [`Rule::step`].

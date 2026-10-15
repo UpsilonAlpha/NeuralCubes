@@ -4,6 +4,7 @@
 //! |---------------|-----------|----------------|-------------|
 //! | `life-like`   | `bool`    | `S/B/2/N`      | `4/4/2/M`   |
 //! | `generations` | `u8`      | `S/B/C/N`, C>2 | `4/4/5/M`   |
+//! | `neural`      | `[f32; C]`| weights JSON   | `web/models/bunny.json` |
 //!
 //! `S` and `B` list the neighbor counts for survival and birth (`5-7,12`), `C` is the
 //! number of states, and `N` is the neighborhood: `M` (Moore, 26) or `N` (von Neumann, 6).
@@ -11,10 +12,12 @@
 mod counts;
 mod generations;
 mod life_like;
+pub mod neural;
 
 pub use counts::CountSet;
 pub use generations::Generations;
 pub use life_like::LifeLike;
+pub use neural::{NcaWeights, NeuralCa};
 
 use crate::neighborhood::Neighborhood;
 use std::fmt;

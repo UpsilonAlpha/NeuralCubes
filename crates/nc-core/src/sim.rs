@@ -1,6 +1,7 @@
 //! Running a rule over a grid, and a type-erased interface for front ends.
 
 use crate::grid::{Dims, Grid};
+use crate::neighborhood::Neighborhood;
 use crate::rng::Rng;
 use crate::rule::{Rule, StepContext};
 
@@ -20,6 +21,15 @@ impl Default for Seeding {
     }
 }
 
+/// The first filled cell a ray enters, and the face it entered through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub cell: [usize; 3],
+    /// Outward normal of the face that was hit, e.g. `[0, 1, 0]` for the top face.
+    /// All zeros if the ray started inside a filled cell.
+    pub normal: [i32; 3],
+}
+
 /// A grid evolving under a concrete rule, double-buffered.
 pub struct Simulation<R: Rule> {
     rule: R,
@@ -27,6 +37,7 @@ pub struct Simulation<R: Rule> {
     back: Grid<R::Cell>,
     ctx: StepContext,
     generation: u64,
+    rng: Rng,
 }
 
 impl<R: Rule> Simulation<R> {
@@ -37,6 +48,7 @@ impl<R: Rule> Simulation<R> {
             back: Grid::new(dims),
             ctx: StepContext::new(dims),
             generation: 0,
+            rng: Rng::new(0x5EED),
         }
     }
 
@@ -53,9 +65,14 @@ impl<R: Rule> Simulation<R> {
     }
 
     pub fn step(&mut self) {
+        self.ctx.generation = self.generation;
         self.rule.step(&self.front, &mut self.back, &self.ctx);
         std::mem::swap(&mut self.front, &mut self.back);
         self.generation += 1;
+    }
+
+    fn filled(&self, x: usize, y: usize, z: usize) -> bool {
+        self.rule.shade(self.front.get(x, y, z)).is_some()
     }
 }
 
@@ -70,10 +87,35 @@ pub trait Automaton {
     fn seed(&mut self, seeding: Seeding);
     /// Number of non-empty cells.
     fn population(&self) -> usize;
-    /// Appends `[x, y, z, shade]` for every non-empty cell that has at least one empty
-    /// face neighbor (fully buried cells are skipped since they can't be seen).
+    /// Appends `[x, y, z, shade, r, g, b, has_color]` for every non-empty cell that has at
+    /// least one empty face neighbor (fully buried cells are skipped since they can't be seen).
     /// Returns the number of cells written.
     fn surface(&self, out: &mut Vec<f32>) -> usize;
+    /// Casts a ray in grid coordinates (cell `(x, y, z)` spans `x..x+1` etc.).
+    fn raycast(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<Hit>;
+    /// Empties every cell within `radius` of `center`. Returns how many cells changed.
+    fn erase(&mut self, center: [f32; 3], radius: f32) -> usize;
+    /// Fills every empty cell within `radius` of `center`. Returns how many cells changed.
+    fn fill(&mut self, center: [f32; 3], radius: f32) -> usize;
+}
+
+/// Cells whose centers lie within `radius` of `center`, clipped to the grid.
+fn ball(d: Dims, center: [f32; 3], radius: f32) -> impl Iterator<Item = (usize, usize, usize)> {
+    let r = radius.max(0.5);
+    let range = move |c: f32, n: usize| {
+        let lo = (c - r).floor().max(0.0) as usize;
+        let hi = ((c + r).ceil().max(0.0) as usize).min(n);
+        lo..hi
+    };
+    let (rx, ry, rz) = (range(center[0], d.x), range(center[1], d.y), range(center[2], d.z));
+    rz.flat_map(move |z| {
+        let rx = rx.clone();
+        ry.clone().flat_map(move |y| rx.clone().map(move |x| (x, y, z)))
+    })
+    .filter(move |&(x, y, z)| {
+        let p = [x as f32 + 0.5 - center[0], y as f32 + 0.5 - center[1], z as f32 + 0.5 - center[2]];
+        p[0] * p[0] + p[1] * p[1] + p[2] * p[2] <= r * r
+    })
 }
 
 impl<R: Rule> Automaton for Simulation<R> {
@@ -104,23 +146,8 @@ impl<R: Rule> Automaton for Simulation<R> {
 
     fn seed(&mut self, s: Seeding) {
         self.clear();
-        let d = self.dims();
-        let mut rng = Rng::new(s.seed);
-        let span = |n: usize| {
-            let k = ((n as f32 * s.extent.clamp(0.0, 1.0)).round() as usize).clamp(1, n);
-            let lo = (n - k) / 2;
-            lo..lo + k
-        };
-        for z in span(d.z) {
-            for y in span(d.y) {
-                for x in span(d.x) {
-                    if rng.next_f32() < s.density {
-                        let c = self.rule.seed_cell(&mut rng);
-                        self.front.set(x, y, z, c);
-                    }
-                }
-            }
-        }
+        self.rng = Rng::new(s.seed ^ 0x9E37_79B9);
+        self.rule.seed_grid(&mut self.front, s);
     }
 
     fn population(&self) -> usize {
@@ -135,7 +162,8 @@ impl<R: Rule> Automaton for Simulation<R> {
         for z in 0..d.z {
             for y in 0..d.y {
                 for x in 0..d.x {
-                    let Some(shade) = self.rule.shade(cells[d.index(x, y, z)]) else { continue };
+                    let cell = cells[d.index(x, y, z)];
+                    let Some(shade) = self.rule.shade(cell) else { continue };
                     // Cells on the grid boundary are always visible.
                     let buried = x > 0
                         && y > 0
@@ -150,12 +178,107 @@ impl<R: Rule> Automaton for Simulation<R> {
                         && filled(x, y, z - 1)
                         && filled(x, y, z + 1);
                     if !buried {
-                        out.extend_from_slice(&[x as f32, y as f32, z as f32, shade]);
+                        let (rgb, has) = match self.rule.color(cell) {
+                            Some(c) => (c, 1.0),
+                            None => ([0.0; 3], 0.0),
+                        };
+                        out.extend_from_slice(&[x as f32, y as f32, z as f32, shade, rgb[0], rgb[1], rgb[2], has]);
                         n += 1;
                     }
                 }
             }
         }
         n
+    }
+
+    fn raycast(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<Hit> {
+        let d = self.dims();
+        let size = [d.x as f32, d.y as f32, d.z as f32];
+        // Clip the ray to the grid's bounding box (slab method).
+        let (mut t0, mut t1) = (0.0f32, f32::INFINITY);
+        let mut entry_axis = None;
+        for a in 0..3 {
+            if dir[a].abs() < 1e-12 {
+                if origin[a] < 0.0 || origin[a] > size[a] {
+                    return None;
+                }
+                continue;
+            }
+            let (mut near, mut far) = ((0.0 - origin[a]) / dir[a], (size[a] - origin[a]) / dir[a]);
+            if near > far {
+                std::mem::swap(&mut near, &mut far);
+            }
+            if near > t0 {
+                t0 = near;
+                entry_axis = Some(a);
+            }
+            t1 = t1.min(far);
+        }
+        if t0 > t1 {
+            return None;
+        }
+        // Walk cells with Amanatides & Woo's traversal.
+        let p = [0, 1, 2].map(|a| origin[a] + dir[a] * (t0 + 1e-4));
+        let mut cell = [0, 1, 2].map(|a| (p[a].floor() as isize).clamp(0, size[a] as isize - 1));
+        let step = [0, 1, 2].map(|a| if dir[a] > 0.0 { 1isize } else { -1 });
+        let delta = [0, 1, 2].map(|a| if dir[a] != 0.0 { (1.0 / dir[a]).abs() } else { f32::INFINITY });
+        let mut next = [0, 1, 2].map(|a| {
+            if dir[a] == 0.0 {
+                f32::INFINITY
+            } else {
+                let boundary = cell[a] as f32 + if dir[a] > 0.0 { 1.0 } else { 0.0 };
+                (boundary - p[a]) / dir[a]
+            }
+        });
+        let mut normal = [0i32; 3];
+        if let Some(a) = entry_axis {
+            normal[a] = -step[a] as i32;
+        }
+        loop {
+            let [x, y, z] = cell.map(|c| c as usize);
+            if self.filled(x, y, z) {
+                return Some(Hit { cell: [x, y, z], normal });
+            }
+            let a = if next[0] < next[1] {
+                if next[0] < next[2] { 0 } else { 2 }
+            } else if next[1] < next[2] {
+                1
+            } else {
+                2
+            };
+            cell[a] += step[a];
+            if cell[a] < 0 || cell[a] >= size[a] as isize {
+                return None;
+            }
+            next[a] += delta[a];
+            normal = [0; 3];
+            normal[a] = -step[a] as i32;
+        }
+    }
+
+    fn erase(&mut self, center: [f32; 3], radius: f32) -> usize {
+        let d = self.dims();
+        let mut n = 0;
+        for (x, y, z) in ball(d, center, radius) {
+            if self.front.get(x, y, z) != R::Cell::default() {
+                self.front.set(x, y, z, R::Cell::default());
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn fill(&mut self, center: [f32; 3], radius: f32) -> usize {
+        let d = self.dims();
+        let targets: Vec<_> = ball(d, center, radius).filter(|&(x, y, z)| !self.filled(x, y, z)).collect();
+        // Decide every new cell from the grid as it was, so the brush result doesn't
+        // depend on iteration order.
+        let snapshot = self.front.clone();
+        for &(x, y, z) in &targets {
+            let n = self.ctx.neighbors(&snapshot, Neighborhood::Moore, x, y, z);
+            let c = self.rule.added_cell(&n, &mut self.rng);
+            self.front.set(x, y, z, c);
+        }
+        targets.len()
     }
 }

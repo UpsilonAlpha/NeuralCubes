@@ -1,21 +1,24 @@
-// Instanced-cube WebGL2 renderer with an orbit camera. No dependencies.
+// Instanced-cube WebGL2 renderer with an orbit camera and cursor picking rays. No dependencies.
 
 const VERT = `#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec4 aCell; // x, y, z, shade
+layout(location = 2) in vec4 aCell;  // x, y, z, shade
+layout(location = 3) in vec4 aColor; // r, g, b, has_color
 uniform mat4 uViewProj;
 uniform float uSize;
 uniform float uGap;
 out vec3 vNormal;
 out vec3 vCell;
 out float vShade;
+out vec4 vColor;
 void main() {
   vec3 p = aCell.xyz - vec3(uSize * 0.5 - 0.5) + aPos * (1.0 - uGap);
   gl_Position = uViewProj * vec4(p, 1.0);
   vNormal = aNormal;
   vCell = aCell.xyz / uSize;
   vShade = aCell.w;
+  vColor = aColor;
 }`;
 
 const FRAG = `#version 300 es
@@ -23,20 +26,25 @@ precision highp float;
 in vec3 vNormal;
 in vec3 vCell;
 in float vShade;
+in vec4 vColor;
 uniform int uColorMode; // 0 = by state, 1 = by position
+uniform vec4 uOverride; // a > 0: flat color with this alpha (brush preview)
 out vec4 outColor;
 vec3 hsv(float h, float s, float v) {
   vec3 k = clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
   return v * mix(vec3(1.0), k, s);
 }
 void main() {
-  vec3 base = uColorMode == 0
-    ? hsv(0.62 - 0.55 * vShade, 0.75, 0.35 + 0.65 * vShade)
-    : vCell;
+  if (uOverride.a > 0.0) { outColor = uOverride; return; }
+  vec3 base = uColorMode == 1 ? vCell
+    : vColor.a > 0.5 ? vColor.rgb
+    : hsv(0.62 - 0.55 * vShade, 0.75, 0.35 + 0.65 * vShade);
   vec3 light = normalize(vec3(0.5, 0.8, 0.35));
   float diff = 0.45 + 0.55 * max(dot(vNormal, light), 0.0);
   outColor = vec4(base * diff, 1.0);
 }`;
+
+const STRIDE = 8; // floats per instance
 
 // 36 vertices of a unit cube centered on the origin: position then normal.
 function cubeVertices() {
@@ -65,18 +73,23 @@ function compile(gl, type, src) {
   return s;
 }
 
+const v3 = {
+  sub: (a, b) => a.map((x, i) => x - b[i]),
+  add: (a, b) => a.map((x, i) => x + b[i]),
+  scale: (a, s) => a.map((x) => x * s),
+  norm: (a) => { const l = Math.hypot(...a); return a.map((x) => x / l); },
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+};
+
 const mat4 = {
   perspective(fovy, aspect, near, far) {
     const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
     return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
   },
   lookAt(eye, target, up) {
-    const sub = (a, b) => a.map((x, i) => x - b[i]);
-    const norm = (a) => { const l = Math.hypot(...a); return a.map((x) => x / l); };
-    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    const z = norm(sub(eye, target)), x = norm(cross(up, z)), y = cross(z, x);
-    return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+    const z = v3.norm(v3.sub(eye, target)), x = v3.norm(v3.cross(up, z)), y = v3.cross(z, x);
+    return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -v3.dot(x, eye), -v3.dot(y, eye), -v3.dot(z, eye), 1];
   },
   mul(a, b) {
     const o = new Array(16).fill(0);
@@ -84,6 +97,8 @@ const mat4 = {
     return o;
   },
 };
+
+const FOV = Math.PI / 4;
 
 export class Renderer {
   constructor(canvas) {
@@ -96,6 +111,9 @@ export class Renderer {
     this.gap = 0.08;
     this.colorMode = 0;
     this.camera = { yaw: 0.7, pitch: 0.45, distance: 2.2 };
+    /** Cells to outline as a brush preview: array of [x, y, z]. */
+    this.preview = [];
+    this.previewColor = [1, 1, 1, 0.35];
 
     const prog = gl.createProgram();
     gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERT));
@@ -103,36 +121,71 @@ export class Renderer {
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
     this.prog = prog;
-    this.u = Object.fromEntries(["uViewProj", "uSize", "uGap", "uColorMode"].map((n) => [n, gl.getUniformLocation(prog, n)]));
+    this.u = Object.fromEntries(
+      ["uViewProj", "uSize", "uGap", "uColorMode", "uOverride"].map((n) => [n, gl.getUniformLocation(prog, n)]),
+    );
 
-    this.vao = gl.createVertexArray();
-    gl.bindVertexArray(this.vao);
     const cube = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, cube);
     gl.bufferData(gl.ARRAY_BUFFER, cubeVertices(), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-    this.instances = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 16, 0);
-    gl.vertexAttribDivisor(2, 1);
-    gl.bindVertexArray(null);
+    const makeVao = () => {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, cube);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2, 4, gl.FLOAT, false, STRIDE * 4, 0);
+      gl.vertexAttribDivisor(2, 1);
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 4, gl.FLOAT, false, STRIDE * 4, 16);
+      gl.vertexAttribDivisor(3, 1);
+      gl.bindVertexArray(null);
+      return { vao, buf };
+    };
+    this.cells = makeVao();
+    this.brush = makeVao();
 
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
-    this.#bindControls();
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   }
 
-  /** Uploads packed [x, y, z, shade] cells. */
+  /** Uploads packed [x, y, z, shade, r, g, b, has_color] cells. */
   setCells(data, gridSize) {
     const gl = this.gl;
     this.gridSize = gridSize;
-    this.count = data.length / 4;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
+    this.count = data.length / STRIDE;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.cells.buf);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+  }
+
+  #eye() {
+    const { yaw, pitch, distance } = this.camera;
+    const r = distance * this.gridSize;
+    return [r * Math.cos(pitch) * Math.sin(yaw), r * Math.sin(pitch), r * Math.cos(pitch) * Math.cos(yaw)];
+  }
+
+  /**
+   * Ray through a point on the canvas (CSS pixels), in grid coordinates where
+   * cell (x, y, z) spans x..x+1 and so on.
+   */
+  rayAt(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = 1 - ((clientY - rect.top) / rect.height) * 2;
+    const eye = this.#eye();
+    const fwd = v3.norm(v3.scale(eye, -1));
+    const right = v3.norm(v3.cross(fwd, [0, 1, 0]));
+    const up = v3.cross(right, fwd);
+    const t = Math.tan(FOV / 2), aspect = rect.width / Math.max(rect.height, 1);
+    const dir = v3.norm(v3.add(fwd, v3.add(v3.scale(right, nx * t * aspect), v3.scale(up, ny * t))));
+    const half = this.gridSize / 2;
+    return { origin: eye.map((v) => v + half), dir };
   }
 
   draw() {
@@ -146,48 +199,46 @@ export class Renderer {
     gl.clearColor(rgb[0], rgb[1], rgb[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    const { yaw, pitch, distance } = this.camera;
-    const r = distance * this.gridSize;
-    const eye = [r * Math.cos(pitch) * Math.sin(yaw), r * Math.sin(pitch), r * Math.cos(pitch) * Math.cos(yaw)];
-    const proj = mat4.perspective(Math.PI / 4, w / Math.max(h, 1), 0.1, r * 4);
+    const eye = this.#eye();
+    const r = Math.hypot(...eye);
+    const proj = mat4.perspective(FOV, w / Math.max(h, 1), 0.1, r * 4);
     const viewProj = mat4.mul(proj, mat4.lookAt(eye, [0, 0, 0], [0, 1, 0]));
 
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(this.u.uViewProj, false, viewProj);
     gl.uniform1f(this.u.uSize, this.gridSize);
-    gl.uniform1f(this.u.uGap, this.gap);
     gl.uniform1i(this.u.uColorMode, this.colorMode);
-    gl.bindVertexArray(this.vao);
+    gl.uniform4f(this.u.uOverride, 0, 0, 0, 0);
+    gl.uniform1f(this.u.uGap, this.gap);
+    gl.bindVertexArray(this.cells.vao);
     if (this.count > 0) gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.count);
+
+    if (this.preview.length) {
+      const data = new Float32Array(this.preview.length * STRIDE);
+      this.preview.forEach(([x, y, z], i) => data.set([x, y, z, 1], i * STRIDE));
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.brush.buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STREAM_DRAW);
+      gl.enable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST); // show the whole brush, including cells behind the surface
+      gl.depthMask(false);
+      gl.uniform1f(this.u.uGap, -0.04);
+      gl.uniform4f(this.u.uOverride, ...this.previewColor);
+      gl.bindVertexArray(this.brush.vao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.preview.length);
+      gl.depthMask(true);
+      gl.enable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+    }
     gl.bindVertexArray(null);
   }
 
-  #bindControls() {
-    const c = this.canvas, cam = this.camera;
-    const pointers = new Map();
-    let pinch = 0;
-    c.addEventListener("pointerdown", (e) => { c.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); });
-    const end = (e) => { pointers.delete(e.pointerId); pinch = 0; };
-    c.addEventListener("pointerup", end);
-    c.addEventListener("pointercancel", end);
-    c.addEventListener("pointermove", (e) => {
-      const prev = pointers.get(e.pointerId);
-      if (!prev) return;
-      pointers.set(e.pointerId, [e.clientX, e.clientY]);
-      if (pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
-        if (pinch) this.#zoom(pinch / d);
-        pinch = d;
-        return;
-      }
-      cam.yaw -= (e.clientX - prev[0]) * 0.008;
-      cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + (e.clientY - prev[1]) * 0.008));
-    });
-    c.addEventListener("wheel", (e) => { e.preventDefault(); this.#zoom(Math.exp(e.deltaY * 0.001)); }, { passive: false });
+  orbit(dx, dy) {
+    const cam = this.camera;
+    cam.yaw -= dx * 0.008;
+    cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + dy * 0.008));
   }
 
-  #zoom(factor) {
+  zoom(factor) {
     this.camera.distance = Math.max(0.6, Math.min(6, this.camera.distance * factor));
   }
 }
