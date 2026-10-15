@@ -9,7 +9,7 @@ compiled to WebAssembly and deployed to GitHub Pages.
 crates/nc-core   simulation core: grids, neighborhoods, the Rule trait, built-in rule families
 crates/nc-web    wasm-bindgen wrapper exposing a `Universe` to JavaScript
 web/             static front end (WebGL2 rendering, WebGPU stepping, no JS dependencies)
-web/models/      trained neural CA weights the viewer can load
+web/models/      trained neural CA weights the viewer can load (listed in index.json)
 training/        JAX scripts: build targets, train a regenerating NCA, export weights
 docs/            the neural CA weights format
 .github/         CI: tests, wasm build, Pages deploy
@@ -108,26 +108,104 @@ the surface follows (by default, drawn cells at 0.5).
 
 ## Training a neural CA
 
+Training is Python (JAX) and runs anywhere JAX does; the Rust engine only runs the result.
+Train on a GPU: a 32³ shape runs at several seconds per iteration on a laptop CPU, so the
+8000 iterations below are only practical on an NVIDIA GPU (one per shape).
+
+### 1. Set up a GPU machine
+
 ```sh
-pip install -r training/requirements.txt
-cd training
-python targets.py --list                                   # bunny tree mushroom cactus torus
-python train_nca.py tree --size 32 --rotation yaw --out ../web/models/tree.json
-python targets.py mesh model.obj --size 32 --out targets/model32.npy   # any mesh trimesh reads
-python train_nca.py targets/model32.npy --out ../web/models/model.json
+python -m venv ~/venvs/nca && source ~/venvs/nca/bin/activate
+pip install -r training/requirements.txt "jax[cuda12]"
+python -c "import jax; print(jax.devices())"     # must list a CudaDevice, not CpuDevice
 ```
 
-Training follows [Growing Neural Cellular Automata](https://distill.pub/2020/growing-ca/):
-a pool of samples is grown from the seed, the worst sample in each batch is reset, and the
-best ones are damaged (`--damage`, `--damage-spheres`, `--damage-radius`, `--cut-prob`)
-so the model learns to regrow. `--rotation yaw` or `full` trains each sample at a random
-orientation, with the gradient features expressed in the sample's own frame, so one model
-grows the shape at any angle (the viewer's Orientation slider). `--checkpoint` saves and
-resumes the whole run.
+If it prints `CpuDevice`, the CUDA wheel didn't match the driver; see the
+[JAX install guide](https://docs.jax.dev/en/latest/installation.html).
 
-On a 4-core CPU a 24³ grid takes about 5 s per iteration; use a GPU for 32³ and up, and
-`--remat` to save memory. See [training/cluster/README.md](training/cluster/README.md) for
-SLURM jobs.
+### 2. Pick the shapes
+
+```sh
+python training/targets.py --list
+python training/targets.py tree --size 32 --preview       # prints a side view to check it
+```
+
+Presets: `bunny`, `tree`, `mushroom`, `cactus`, `torus`, `sphere`. Any mesh works too:
+`python training/targets.py mesh model.obj --size 32 --out training/targets/model32.npy`,
+then pass the `.npy` path instead of a preset name. New procedural presets are a function
+in `training/targets.py` returning an inside mask and colors, added to `PRESETS`.
+
+### 3. Train
+
+One machine, every preset, spread across all its GPUs:
+
+```sh
+training/train_all.sh                                    # bunny tree mushroom cactus torus sphere
+TARGETS="tree cactus" ROTATION=full training/train_all.sh
+```
+
+A SLURM cluster, one job per shape:
+
+```sh
+sbatch --array=0-5 training/cluster/train.sbatch
+```
+
+Both use the settings below and read `TARGETS`, `SIZE` (32), `ROTATION` (`yaw`),
+`ITERATIONS` (8000) and `OUT` (`runs/`) from the environment. To run one shape by hand:
+
+```sh
+python training/train_nca.py tree --size 32 --rotation yaw --iterations 8000 \
+  --batch 8 --damage 3 --hidden 128 --min-steps 64 --max-steps 96 \
+  --checkpoint runs/tree.ckpt --out runs/tree.json --export-every 200
+```
+
+What the settings do, and why they're the defaults:
+
+| Setting | Default | Why |
+|---|---|---|
+| `--size 32` | 32³ grid | Room for ears, branches and arms; about 24 voxels across the shape. |
+| `--iterations 8000` | | The Distill paper's budget. Fewer leaves the shape unstable over long runs. |
+| `--batch 8 --pool 256` | | Samples come from a pool and go back after each step, so the model trains on states it grew itself, including old ones. This is what teaches it to *stop* growing. |
+| `--min-steps 64 --max-steps 96` | | Long rollouts per iteration; short ones grow the shape but don't hold it. |
+| `--damage 3` | 3 of 8 | The best samples get spheres or slices cut out (`--damage-spheres`, `--damage-radius`, `--cut-prob`), so the model learns to regrow. |
+| `--rotation yaw` | | Each sample grows at a random turn about the vertical axis, so one model works at any heading (the viewer's Orientation slider). `full` adds tilt and roll; it needs more iterations. `none` trains upright only. |
+| `--hidden 128` | | Width of the update network. 64 trains faster; more helps detailed shapes. |
+| `--remat` | off | Recomputes activations to save GPU memory. Add it if a run fails with out of memory. |
+
+Runs checkpoint (weights, optimizer and pool), so rerunning the same command resumes, and
+a preempted SLURM job requeues itself. Weights are written to `runs/<shape>.json` every 200
+iterations, so a half-trained model can be opened in the viewer (Load neural CA weights)
+while training goes on. Logs go to `logs/`.
+
+### 4. Check that it holds its shape
+
+A model can match the target at step 96 and still drift or swell over thousands of steps.
+Measure it before shipping:
+
+```sh
+cargo run --release -p nc-core --example longrun runs/tree.json 3000
+```
+
+This grows the shape, carves a ball out halfway, and prints the cell count and the overlap
+(IoU) with the step-150 shape over time. A good model stays near IoU 1 and recovers after
+the cut; a count that keeps climbing means it needs more iterations or longer rollouts.
+
+### 5. Ship it in the viewer
+
+Copy the weights to `web/models/<shape>.json` and add a line to `web/models/index.json`:
+
+```json
+[
+  { "model": "bunny", "label": "Bunny (neural CA, regenerates)" },
+  { "model": "tree", "label": "Tree (neural CA)" }
+]
+```
+
+The preset list, `#model=tree` links and `nca:tree` in the rule box then all work.
+
+Models from other training code load too if exported in the
+[weights format](docs/nca-weights.md); `training/export_torch_notebook.py` converts the
+PyTorch notebook's models.
 
 ## Adding a rule family
 

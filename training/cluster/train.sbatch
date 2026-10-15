@@ -1,7 +1,7 @@
 #!/bin/bash
 # Train one neural CA per target on a SLURM cluster, one GPU each.
 #
-#   sbatch --array=0-4 training/cluster/train.sbatch        # every preset below
+#   sbatch --array=0-5 training/cluster/train.sbatch        # every preset below
 #   TARGETS="tree" ROTATION=full sbatch --array=0 training/cluster/train.sbatch
 #
 # Edit the #SBATCH lines for your cluster (partition, account, time limit). Jobs write
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-TARGETS=(${TARGETS:-bunny tree mushroom cactus torus})
+TARGETS=(${TARGETS:-bunny tree mushroom cactus torus sphere})
 TARGET=${TARGETS[$SLURM_ARRAY_TASK_ID]}
 SIZE=${SIZE:-32}
 ROTATION=${ROTATION:-yaw}
@@ -33,5 +33,5 @@ source "${VENV:-$HOME/venvs/nca}/bin/activate"
 
 python training/train_nca.py "$TARGET" \
   --size "$SIZE" --rotation "$ROTATION" --iterations "$ITERATIONS" \
-  --batch 8 --damage 3 --hidden 128 --min-steps 48 --max-steps 96 \
+  --batch 8 --damage 3 --hidden 128 --min-steps 64 --max-steps 96 \
   --checkpoint "$OUT/$TARGET.ckpt" --out "$OUT/$TARGET.json" --export-every 200

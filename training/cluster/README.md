@@ -16,7 +16,7 @@ array with one task per target.
    from the repository root:
 
    ```sh
-   sbatch --array=0-4 training/cluster/train.sbatch          # bunny tree mushroom cactus torus
+   sbatch --array=0-5 training/cluster/train.sbatch          # bunny tree mushroom cactus torus sphere
    TARGETS="tree" ROTATION=full sbatch --array=0 training/cluster/train.sbatch
    ```
 
@@ -26,12 +26,12 @@ array with one task per target.
 
 3. Weights land in `runs/<target>.json` every 200 iterations, so you can load a
    half-trained model in the viewer while the job runs. Copy finished ones to
-   `web/models/` to ship them with the site.
+   `web/models/` and list them in `web/models/index.json` to ship them with the site.
 
 Jobs checkpoint to `runs/<target>.ckpt` (weights, optimizer state and the sample pool).
 Resubmitting the same command resumes from it; with `--requeue` a preempted job does that
 on its own. Delete the checkpoint to start over.
 
-The script's defaults (32³ grid, hidden 128, batch 8, 48 to 96 steps) are sized for one
+The script's defaults (32³ grid, hidden 128, batch 8, 64 to 96 steps) are sized for one
 modern GPU. Add `--remat` to the `python` line if the GPU runs out of memory on bigger
-grids. Without SLURM, run the same `python training/train_nca.py ...` line directly.
+grids. Without SLURM, `training/train_all.sh` runs the same settings across the GPUs of one machine. The main [README](../../README.md#training-a-neural-ca) explains each setting and how to check a model holds its shape.

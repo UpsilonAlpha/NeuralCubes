@@ -142,6 +142,20 @@ def torus(size, fit):
     return inside, rgb
 
 
+def sphere(size, fit):
+    x, y, z = _coords(size)
+    s = fit / 26
+    inside = np.sqrt(x**2 + y**2 + z**2) < 12 * s
+    # Bands of latitude and a stripe of longitude, so the viewer shows which way is up and
+    # how the shape is turned.
+    lat = np.where(y > 4 * s, 1, np.where(y < -4 * s, 2, 0))
+    rgb = np.stack([np.choose(lat, [0.95, 0.30, 0.95]), np.choose(lat, [0.85, 0.55, 0.45]),
+                    np.choose(lat, [0.30, 0.85, 0.20])], -1)
+    stripe = (np.abs(z) < 2.5 * s) & (x > 0)
+    rgb[stripe] = (0.85, 0.20, 0.25)
+    return inside, rgb
+
+
 def bunny(size, fit):
     inside = mesh_occupancy(os.path.join(HERE, "meshes", "bunny.json"), size, fit)
     return inside, height_gradient(inside)
@@ -153,6 +167,7 @@ PRESETS = {
     "mushroom": (mushroom, "white stem, red cap, pale gills"),
     "cactus": (cactus, "column with two arms in a clay pot"),
     "torus": (torus, "ring with a hue that wraps around it"),
+    "sphere": (sphere, "ball with latitude bands and one red stripe, so turns are visible"),
 }
 
 

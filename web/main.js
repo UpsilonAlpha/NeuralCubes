@@ -2,9 +2,9 @@ import init, { Universe } from "./pkg/nc_web.js";
 import { Renderer } from "./renderer.js";
 import { GpuNca } from "./gpu.js";
 
-// Well-known 3D rules, with seeding that suits each, plus trained neural CA models.
+// Well-known 3D rules, with seeding that suits each. Trained neural CA models are listed
+// in models/index.json and go in front of these.
 const PRESETS = [
-  { name: "Bunny (neural CA, regenerates)", model: "bunny" },
   { name: "445", rule: "4/4/5/M", extent: 0.3, density: 0.3 },
   { name: "Amoeba", rule: "9-26/5-7,12-13,15/5/M", extent: 0.5, density: 0.5 },
   { name: "Architecture", rule: "4-6/3/2/M", extent: 0.2, density: 0.3 },
@@ -22,6 +22,15 @@ const ui = Object.fromEntries(
     "density", "color", "brush", "modelFile", "seedControls", "hint", "viewMode", "yaw", "pitch", "roll",
     "orientControls", "tiltControls", "orientHint", "gpuControls", "useGpu", "gpuNote"].map((id) => [id, $(id)]),
 );
+
+async function modelPresets() {
+  try {
+    const res = await fetch("models/index.json");
+    if (res.ok) return (await res.json()).map((m) => ({ name: m.label ?? m.model, model: m.model }));
+  } catch { /* fall through */ }
+  return [{ name: "Bunny (neural CA, regenerates)", model: "bunny" }];
+}
+PRESETS.unshift(...(await modelPresets()));
 
 await init();
 const renderer = new Renderer(ui.canvas);
@@ -340,8 +349,9 @@ if (fromHash.model) {
   await applyPreset(PRESETS[0]);
 }
 if (!universe) {
-  ui.preset.value = 1;
-  applyPreset(PRESETS[1]);
+  const i = PRESETS.findIndex((p) => p.rule);
+  ui.preset.value = i;
+  applyPreset(PRESETS[i]);
 }
 
 function stepOnGpu(steps) {
