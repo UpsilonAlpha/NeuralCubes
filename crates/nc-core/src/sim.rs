@@ -95,6 +95,20 @@ pub trait Automaton {
     /// least one empty face neighbor (fully buried cells are skipped since they can't be seen).
     /// Returns the number of cells written.
     fn surface(&self, out: &mut Vec<f32>) -> usize;
+    /// Appends a smooth triangle mesh of the visible cells (see [`crate::mesh::marching_cubes`]),
+    /// with `smooth` blur passes. Returns the number of triangles.
+    fn mesh(&self, smooth: u32, out: &mut Vec<f32>) -> usize;
+    /// See [`Rule::gpu_params`].
+    fn gpu_params(&self) -> Option<String>;
+    /// The whole grid as floats (cell after cell), or empty if the rule has no float form.
+    fn export_state(&self) -> Vec<f32>;
+    /// Replaces the grid with `data` from [`Automaton::export_state`] (for example after
+    /// stepping it on a GPU) and sets the generation. Returns false if `data` doesn't fit.
+    fn import_state(&mut self, data: &[f32], generation: u64) -> bool;
+    /// See [`Rule::orientation_mode`].
+    fn orientation_mode(&self) -> Option<String>;
+    /// See [`Rule::set_orientation`]. Takes effect on the next step and reseed.
+    fn set_orientation(&mut self, yaw: f32, pitch: f32, roll: f32);
     /// Casts a ray in grid coordinates (cell `(x, y, z)` spans `x..x+1` etc.).
     fn raycast(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<Hit>;
     /// Empties every cell within `radius` of `center`. Returns how many cells changed.
@@ -211,6 +225,66 @@ impl<R: Rule> Automaton for Simulation<R> {
             }
         }
         n
+    }
+
+    fn mesh(&self, smooth: u32, out: &mut Vec<f32>) -> usize {
+        let cells = self.front.cells();
+        crate::mesh::marching_cubes(
+            self.dims(),
+            self.rule.iso_level(),
+            smooth,
+            |i| {
+                let cell = cells[i];
+                let (rgb, has) = match self.rule.color(cell) {
+                    Some(c) => (c, 1.0),
+                    None => ([0.0; 3], 0.0),
+                };
+                let shade = self.rule.shade(cell).unwrap_or(0.0);
+                (
+                    self.rule.density(cell),
+                    [shade, rgb[0], rgb[1], rgb[2], has],
+                )
+            },
+            out,
+        )
+    }
+
+    fn gpu_params(&self) -> Option<String> {
+        self.rule.gpu_params()
+    }
+
+    fn export_state(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        for &cell in self.front.cells() {
+            self.rule.cell_to_floats(cell, &mut out);
+        }
+        out
+    }
+
+    fn import_state(&mut self, data: &[f32], generation: u64) -> bool {
+        let n = self.front.cells().len();
+        if n == 0 || data.is_empty() || !data.len().is_multiple_of(n) {
+            return false;
+        }
+        let per = data.len() / n;
+        let cells: Option<Vec<_>> = data
+            .chunks(per)
+            .map(|f| self.rule.cell_from_floats(f))
+            .collect();
+        let Some(cells) = cells else {
+            return false;
+        };
+        self.front.cells_mut().copy_from_slice(&cells);
+        self.generation = generation;
+        true
+    }
+
+    fn orientation_mode(&self) -> Option<String> {
+        self.rule.orientation_mode()
+    }
+
+    fn set_orientation(&mut self, yaw: f32, pitch: f32, roll: f32) {
+        self.rule.set_orientation(yaw, pitch, roll);
     }
 
     fn raycast(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<Hit> {

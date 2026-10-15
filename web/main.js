@@ -1,5 +1,6 @@
 import init, { Universe } from "./pkg/nc_web.js";
 import { Renderer } from "./renderer.js";
+import { GpuNca } from "./gpu.js";
 
 // Well-known 3D rules, with seeding that suits each, plus trained neural CA models.
 const PRESETS = [
@@ -18,7 +19,8 @@ const PRESETS = [
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries(
   ["canvas", "stats", "preset", "rule", "apply", "error", "play", "step", "reseed", "speed", "size", "extent",
-    "density", "color", "brush", "modelFile", "seedControls", "hint"].map((id) => [id, $(id)]),
+    "density", "color", "brush", "modelFile", "seedControls", "hint", "viewMode", "yaw", "pitch", "roll",
+    "orientControls", "tiltControls", "orientHint", "gpuControls", "useGpu", "gpuNote"].map((id) => [id, $(id)]),
 );
 
 await init();
@@ -28,6 +30,9 @@ let model = null; // { name, json } when running a neural CA
 let running = true;
 let dirty = true;
 let tool = "orbit";
+let gpu = null; // GpuNca stepping the neural CA, when WebGPU is available and enabled
+let gpuEpoch = 0; // bumped whenever the CPU state changes, so stale GPU readbacks are dropped
+let gpuBusy = false;
 
 // ---- URL hash: #rule=4/4/5/M&size=48 or #model=bunny&size=24 ----
 
@@ -58,7 +63,35 @@ function setSize(n) {
 
 function reseed() {
   universe.seed(Number(ui.extent.value), Number(ui.density.value), (Math.random() * 2 ** 32) >>> 0);
+  changed();
+}
+
+/** Call after any CPU-side change to the state, so the GPU copy follows it. */
+function changed() {
   dirty = true;
+  gpuEpoch++;
+  if (gpu) {
+    gpu.setRotation(JSON.parse(universe.gpu_params()).rotation);
+    gpu.upload(universe.state());
+  }
+}
+
+async function startGpu() {
+  gpu?.destroy();
+  gpu = null;
+  const params = universe.family() === "neural" && universe.gpu_params();
+  ui.gpuControls.hidden = !params || !navigator.gpu;
+  if (!params || !navigator.gpu || !ui.useGpu.checked) return;
+  const mine = universe;
+  try {
+    const g = await GpuNca.create(JSON.parse(params), model.json, universe.size());
+    if (universe !== mine || !ui.useGpu.checked) return g?.destroy();
+    gpu = g;
+    ui.gpuNote.textContent = g ? "" : "No GPU adapter, so the CPU is running the model.";
+    changed();
+  } catch (e) {
+    ui.gpuNote.textContent = `WebGPU failed, so the CPU is running the model: ${e.message ?? e}`;
+  }
 }
 
 function install(next) {
@@ -67,8 +100,31 @@ function install(next) {
   ui.rule.value = universe.notation();
   ui.error.textContent = "";
   ui.seedControls.hidden = universe.family() === "neural";
+  showOrientation();
   reseed();
   writeHash();
+  startGpu();
+}
+
+const ORIENT_HINTS = {
+  none: "This model was trained upright only, so other orientations may not grow cleanly.",
+  yaw: "Trained at every turn about the vertical axis. Reseed to grow at the new angle.",
+  full: "Trained at every orientation. Reseed to grow at the new angle.",
+};
+
+function showOrientation() {
+  const mode = universe.orientation_mode();
+  ui.orientControls.hidden = !mode;
+  if (!mode) return;
+  ui.tiltControls.hidden = mode !== "full";
+  ui.orientHint.textContent = ORIENT_HINTS[mode] ?? "";
+  applyOrientation();
+}
+
+function applyOrientation() {
+  const rad = (el) => (Number(el.value) * Math.PI) / 180;
+  universe.set_orientation(rad(ui.yaw), rad(ui.pitch), rad(ui.roll));
+  if (gpu) gpu.setRotation(JSON.parse(universe.gpu_params()).rotation);
 }
 
 function showError(e) {
@@ -133,6 +189,10 @@ bindOutput(ui.speed, "speedOut", (v) => `${v} steps/s`);
 bindOutput(ui.size, "sizeOut", (v) => `${v}³`);
 bindOutput(ui.extent, "extentOut", (v) => `${Math.round(v * 100)}%`);
 bindOutput(ui.density, "densityOut", (v) => `${Math.round(v * 100)}%`);
+for (const k of ["yaw", "pitch", "roll"]) {
+  bindOutput(ui[k], `${k}Out`, (v) => `${v}°`);
+  ui[k].addEventListener("input", () => { if (universe) applyOrientation(); });
+}
 bindOutput(ui.brush, "brushOut", (v) => (Number(v) <= 0.5 ? "1 cell" : `radius ${v}`));
 
 ui.preset.addEventListener("change", () => {
@@ -141,10 +201,12 @@ ui.preset.addEventListener("change", () => {
 ui.apply.addEventListener("click", () => { ui.preset.value = "custom"; buildRule(ui.rule.value); });
 ui.rule.addEventListener("keydown", (e) => { if (e.key === "Enter") ui.apply.click(); });
 ui.play.addEventListener("click", () => setRunning(!running));
-ui.step.addEventListener("click", () => { setRunning(false); universe.step(1); dirty = true; });
+ui.step.addEventListener("click", () => { setRunning(false); universe.step(1); changed(); });
+ui.useGpu.addEventListener("change", startGpu);
 ui.reseed.addEventListener("click", reseed);
 ui.size.addEventListener("change", rebuild);
 ui.color.addEventListener("change", () => { renderer.colorMode = Number(ui.color.value); });
+ui.viewMode.addEventListener("change", () => { renderer.mode = ui.viewMode.value; dirty = true; });
 ui.modelFile.addEventListener("change", async () => {
   const file = ui.modelFile.files[0];
   if (!file) return;
@@ -199,8 +261,8 @@ function brushCells([cx, cy, cz]) {
 
 function applyTool(cell) {
   const r = Number(ui.brush.value);
-  const changed = tool === "add" ? universe.fill(...cell, r) : universe.erase(...cell, r);
-  if (changed) dirty = true;
+  const n = tool === "add" ? universe.fill(...cell, r) : universe.erase(...cell, r);
+  if (n) changed();
 }
 
 function hover(e) {
@@ -282,6 +344,18 @@ if (!universe) {
   applyPreset(PRESETS[1]);
 }
 
+function stepOnGpu(steps) {
+  const g = gpu, epoch = gpuEpoch, gen = universe.generation();
+  gpuBusy = true;
+  g.step(steps, gen);
+  g.read()
+    .then((state) => {
+      if (g === gpu && epoch === gpuEpoch) { universe.set_state(state, gen + steps); dirty = true; }
+    })
+    .catch(() => {})
+    .finally(() => { gpuBusy = false; });
+}
+
 let last = performance.now();
 let owed = 0;
 function frame(now) {
@@ -289,15 +363,29 @@ function frame(now) {
     owed += ((now - last) / 1000) * Number(ui.speed.value);
     const steps = Math.min(Math.floor(owed), 4);
     owed = Math.min(owed - steps, 1);
-    if (steps > 0) { universe.step(steps); dirty = true; }
+    if (steps > 0 && gpu) {
+      if (!gpuBusy) stepOnGpu(steps);
+    } else if (steps > 0) {
+      universe.step(steps);
+      dirty = true;
+    }
   }
   last = now;
   if (dirty) {
-    const cells = universe.surface();
-    renderer.setCells(cells, universe.size());
+    let drawn;
+    if (renderer.mode === "smooth") {
+      // Neural alpha is already graded; binary occupancy needs one blur pass to lose its steps.
+      const mesh = universe.mesh(universe.family() === "neural" ? 0 : 1);
+      renderer.setMesh(mesh, universe.size());
+      drawn = `${(mesh.length / 33).toLocaleString()} triangles`;
+    } else {
+      const cells = universe.surface();
+      renderer.setCells(cells, universe.size());
+      drawn = `drawn ${(cells.length / 8).toLocaleString()}`;
+    }
     ui.stats.textContent =
-      `${universe.family()}  ${universe.notation()}${running ? "" : "  (paused)"}\n` +
-      `step ${universe.generation()}  ·  population ${universe.population().toLocaleString()}  ·  drawn ${(cells.length / 8).toLocaleString()}`;
+      `${universe.family()}  ${universe.notation()}${gpu ? "  on GPU" : ""}${running ? "" : "  (paused)"}\n` +
+      `step ${universe.generation()}  ·  population ${universe.population().toLocaleString()}  ·  ${drawn}`;
     dirty = false;
   }
   renderer.draw();

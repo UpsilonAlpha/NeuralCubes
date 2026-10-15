@@ -81,6 +81,39 @@ impl Universe {
         self.surface.clone()
     }
 
+    /// Smooth surface as a triangle list, 11 floats per vertex:
+    /// `[x, y, z, nx, ny, nz, shade, r, g, b, has_color]` in grid coordinates.
+    pub fn mesh(&mut self, smooth: u32) -> Vec<f32> {
+        self.surface.clear();
+        self.sim.mesh(smooth, &mut self.surface);
+        self.surface.clone()
+    }
+
+    /// Settings a WebGPU implementation needs besides the weights (JSON), or `undefined`.
+    pub fn gpu_params(&self) -> Option<String> {
+        self.sim.gpu_params()
+    }
+
+    /// The grid's state as floats, cell after cell (neural CAs only).
+    pub fn state(&self) -> Vec<f32> {
+        self.sim.export_state()
+    }
+
+    /// Replaces the state (e.g. after stepping on the GPU) and sets the generation.
+    pub fn set_state(&mut self, data: &[f32], generation: f64) -> bool {
+        self.sim.import_state(data, generation as u64)
+    }
+
+    /// `none`, `yaw` or `full` for neural CAs trained with rotation; `undefined` otherwise.
+    pub fn orientation_mode(&self) -> Option<String> {
+        self.sim.orientation_mode()
+    }
+
+    /// Rotates a neural CA's behavior (radians). Takes effect on the next step and reseed.
+    pub fn set_orientation(&mut self, yaw: f32, pitch: f32, roll: f32) {
+        self.sim.set_orientation(yaw, pitch, roll);
+    }
+
     /// Casts a ray in grid coordinates. Returns `[x, y, z, nx, ny, nz]` for the first filled
     /// cell and the face it was entered through, or `undefined` on a miss.
     pub fn raycast(

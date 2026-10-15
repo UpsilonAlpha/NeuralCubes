@@ -38,6 +38,21 @@ pub trait Rule: Send + Sync + 'static {
         None
     }
 
+    /// How solid a cell is, for smooth surfaces: the surface is drawn where this crosses
+    /// [`Rule::iso_level`]. The default is 1 for any drawn cell and 0 otherwise.
+    fn density(&self, cell: Self::Cell) -> f32 {
+        if self.shade(cell).is_some() {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// The density at which the smooth surface is drawn.
+    fn iso_level(&self) -> f32 {
+        0.5
+    }
+
     /// The cell placed when a user adds material at an empty spot.
     fn added_cell(&self, _neighbors: &Neighbors<'_, Self::Cell>, rng: &mut Rng) -> Self::Cell {
         self.seed_cell(rng)
@@ -63,6 +78,29 @@ pub trait Rule: Send + Sync + 'static {
             }
         }
     }
+
+    /// Appends a cell's state as floats, for rules that can hand their state to a GPU.
+    fn cell_to_floats(&self, _cell: Self::Cell, _out: &mut Vec<f32>) {}
+
+    /// The inverse of [`Rule::cell_to_floats`]; `None` if the rule has no float form.
+    fn cell_from_floats(&self, _floats: &[f32]) -> Option<Self::Cell> {
+        None
+    }
+
+    /// Everything a GPU implementation of this rule needs besides its weights, as JSON.
+    /// `None` for rules without a GPU path.
+    fn gpu_params(&self) -> Option<String> {
+        None
+    }
+
+    /// For rules whose behavior can be rotated (neural CAs with gradient perception): the
+    /// orientations the rule was trained for (`none`, `yaw` or `full`). `None` if it can't rotate.
+    fn orientation_mode(&self) -> Option<String> {
+        None
+    }
+
+    /// Rotates the rule's behavior (radians). Ignored by rules that can't rotate.
+    fn set_orientation(&mut self, _yaw: f32, _pitch: f32, _roll: f32) {}
 
     /// Advances the whole grid by one generation, writing into `dst`.
     fn step(&self, src: &Grid<Self::Cell>, dst: &mut Grid<Self::Cell>, ctx: &StepContext) {

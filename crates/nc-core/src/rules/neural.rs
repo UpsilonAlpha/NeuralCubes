@@ -72,6 +72,13 @@ pub struct NcaWeights {
     pub feature_order: FeatureOrder,
     #[serde(default)]
     pub boundary: Boundary,
+    /// Kernels holding the x, y and z gradients, so the model can be rotated. Defaults to
+    /// `[1, 2, 3]` when `kernels` is absent (the default Sobel set).
+    pub gradient_kernels: Option<[usize; 3]>,
+    /// Sign of each gradient kernel relative to +x, +y, +z. Defaults to all positive.
+    pub gradient_signs: Option<[f32; 3]>,
+    /// Orientations the model was trained for: `none`, `yaw` or `full`. Informational.
+    pub rotation: Option<String>,
     /// `hidden x (kernels * channels)`, row-major.
     pub w1: Vec<f32>,
     pub b1: Vec<f32>,
@@ -105,6 +112,13 @@ impl NcaWeights {
                 bad.len()
             )));
         }
+        if let Some(g) = w.gradient_kernels {
+            if g.iter().any(|&i| i >= k) {
+                return Err(ParseError(format!(
+                    "NCA weights: gradient_kernels {g:?} out of range for {k} kernels"
+                )));
+            }
+        }
         if c <= ALPHA {
             return Err(ParseError(format!(
                 "NCA needs at least {} channels, got {c}",
@@ -117,6 +131,26 @@ impl NcaWeights {
     fn kernel_count(&self) -> usize {
         self.kernels.as_ref().map_or(4, Vec::len)
     }
+
+    fn gradient_kernels(&self) -> Option<[usize; 3]> {
+        self.gradient_kernels
+            .or(self.kernels.is_none().then_some([1, 2, 3]))
+    }
+}
+
+/// Rotation matrix (acting on x, y, z with y up) for yaw about y, then pitch about x,
+/// then roll about z, applied as `R = Ry(yaw) * Rx(pitch) * Rz(roll)`.
+pub fn rotation_matrix(yaw: f32, pitch: f32, roll: f32) -> [[f32; 3]; 3] {
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let (sr, cr) = roll.sin_cos();
+    let ry = [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]];
+    let rx = [[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]];
+    let rz = [[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]];
+    let mul = |a: [[f32; 3]; 3], b: [[f32; 3]; 3]| {
+        std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+    };
+    mul(mul(ry, rx), rz)
 }
 
 /// Identity and Sobel x/y/z kernels (scaled by 1/32), in block order.
@@ -141,6 +175,8 @@ pub struct NeuralCa<const C: usize> {
     /// Nonzero taps of each kernel as `(block index, weight)`.
     taps: Vec<Vec<(usize, f32)>>,
     seed: [f32; C],
+    /// Current orientation; `None` is the trained orientation.
+    rotation: Option<[[f32; 3]; 3]>,
 }
 
 impl<const C: usize> NeuralCa<C>
@@ -177,7 +213,28 @@ where
             weights,
             taps,
             seed,
+            rotation: None,
         })
+    }
+
+    /// Whether this model's gradient kernels are known, so it can be rotated.
+    pub fn rotatable(&self) -> bool {
+        self.weights.gradient_kernels().is_some()
+    }
+
+    /// Grows and repairs the shape rotated by `r` (see [`rotation_matrix`]). Models only
+    /// hold their shape well at orientations they were trained for (`weights.rotation`).
+    pub fn set_rotation(&mut self, r: [[f32; 3]; 3]) {
+        let identity =
+            (0..3).all(|i| (0..3).all(|j| (r[i][j] - f32::from(u8::from(i == j))).abs() < 1e-6));
+        self.rotation = (!identity && self.rotatable()).then_some(r);
+    }
+
+    fn feature(&self, k: usize, c: usize) -> usize {
+        match self.weights.feature_order {
+            FeatureOrder::KernelMajor => k * C + c,
+            FeatureOrder::ChannelMajor => c * self.taps.len() + k,
+        }
     }
 
     /// The state a seed cell starts in.
@@ -218,11 +275,18 @@ where
         for (k, taps) in self.taps.iter().enumerate() {
             for &(j, kw) in taps {
                 for (c, v) in block[j].iter().enumerate() {
-                    let f = match w.feature_order {
-                        FeatureOrder::KernelMajor => k * C + c,
-                        FeatureOrder::ChannelMajor => c * kn + k,
-                    };
-                    feats[f] += kw * v;
+                    feats[self.feature(k, c)] += kw * v;
+                }
+            }
+        }
+        if let (Some(r), Some(g)) = (self.rotation, w.gradient_kernels()) {
+            // Express each channel's gradient in the shape's own frame: R^T g.
+            let sign = w.gradient_signs.unwrap_or([1.0; 3]);
+            for c in 0..C {
+                let idx = [0, 1, 2].map(|a| self.feature(g[a], c));
+                let v = [0, 1, 2].map(|a| feats[idx[a]] * sign[a]);
+                for a in 0..3 {
+                    feats[idx[a]] = (r[0][a] * v[0] + r[1][a] * v[1] + r[2][a] * v[2]) * sign[a];
                 }
             }
         }
@@ -290,9 +354,20 @@ where
     }
 }
 
-fn fires(generation: u64, i: usize, rate: f32) -> bool {
-    let mut r = Rng::new(generation.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (i as u64));
-    r.next_f32() < rate
+/// A 32-bit integer hash ("lowbias32"), cheap on GPUs, so the CPU and WebGPU paths
+/// make the same firing decisions.
+pub fn hash32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
+}
+
+/// Whether cell `i` applies its update at `generation`.
+pub fn fires(generation: u64, i: usize, rate: f32) -> bool {
+    let h = hash32(i as u32 ^ hash32(generation as u32 ^ 0x9e37_79b9));
+    ((h >> 8) as f32) / 16_777_216.0 < rate
 }
 
 impl<const C: usize> Rule for NeuralCa<C>
@@ -335,6 +410,14 @@ where
         (a >= VISIBLE_ALPHA).then(|| a.min(1.0))
     }
 
+    fn density(&self, cell: Self::Cell) -> f32 {
+        cell[ALPHA].clamp(0.0, 1.0)
+    }
+
+    fn iso_level(&self) -> f32 {
+        VISIBLE_ALPHA
+    }
+
     fn color(&self, cell: Self::Cell) -> Option<[f32; 3]> {
         let a = cell[ALPHA].max(VISIBLE_ALPHA);
         Some([0, 1, 2].map(|c| (cell[c] / a).clamp(0.0, 1.0)))
@@ -359,15 +442,70 @@ where
         cell
     }
 
-    /// Places the single seed cell, centered the same way the model was trained.
+    /// Places the single seed cell where the model was trained to start, centered in the
+    /// grid and turned with the current rotation.
     fn seed_grid(&self, grid: &mut Grid<Self::Cell>, _s: Seeding) {
         let d = grid.dims();
         let train = self.weights.grid.unwrap_or(d.x);
         let [sz, sy, sx] = self.weights.seed.unwrap_or([train / 2; 3]);
-        let shift = |v: usize, n: usize| {
-            (v as isize + (n as isize - train as isize) / 2).clamp(0, n as isize - 1) as usize
+        let tc = (train as f32 - 1.0) / 2.0;
+        let p = [sx as f32 - tc, sy as f32 - tc, sz as f32 - tc];
+        let p = match self.rotation {
+            Some(r) => std::array::from_fn(|i| (0..3).map(|j| r[i][j] * p[j]).sum::<f32>()),
+            None => p,
         };
-        grid.set(shift(sx, d.x), shift(sy, d.y), shift(sz, d.z), self.seed);
+        let place =
+            |v: f32, n: usize| ((v + (n as f32 - 1.0) / 2.0).round().max(0.0) as usize).min(n - 1);
+        grid.set(
+            place(p[0], d.x),
+            place(p[1], d.y),
+            place(p[2], d.z),
+            self.seed,
+        );
+    }
+
+    fn cell_to_floats(&self, cell: Self::Cell, out: &mut Vec<f32>) {
+        out.extend_from_slice(&cell);
+    }
+
+    fn cell_from_floats(&self, f: &[f32]) -> Option<Self::Cell> {
+        (f.len() == C).then(|| std::array::from_fn(|c| f[c]))
+    }
+
+    fn gpu_params(&self) -> Option<String> {
+        let w = &self.weights;
+        let kernels: Vec<Vec<f32>> = match &w.kernels {
+            Some(k) => k.clone(),
+            None => default_kernels().iter().map(|k| k.to_vec()).collect(),
+        };
+        Some(
+            serde_json::json!({
+                "channels": C,
+                "hidden": w.hidden,
+                "kernels": kernels,
+                "channel_major": w.feature_order == FeatureOrder::ChannelMajor,
+                "wrap": w.boundary == Boundary::Wrap,
+                "fire_rate": w.fire_rate,
+                "alive_threshold": w.alive_threshold,
+                "rotation": self.rotation,
+                "gradient_kernels": w.gradient_kernels(),
+                "gradient_signs": w.gradient_signs.unwrap_or([1.0; 3]),
+            })
+            .to_string(),
+        )
+    }
+
+    fn orientation_mode(&self) -> Option<String> {
+        self.rotatable().then(|| {
+            self.weights
+                .rotation
+                .clone()
+                .unwrap_or_else(|| "none".into())
+        })
+    }
+
+    fn set_orientation(&mut self, yaw: f32, pitch: f32, roll: f32) {
+        self.set_rotation(rotation_matrix(yaw, pitch, roll));
     }
 
     fn step(&self, src: &Grid<Self::Cell>, dst: &mut Grid<Self::Cell>, ctx: &StepContext) {

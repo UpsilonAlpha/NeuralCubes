@@ -5,6 +5,8 @@
 //! implementation (a "rule family"); see [`rules`] for the built-in ones.
 
 pub mod grid;
+mod mc_tables;
+pub mod mesh;
 pub mod neighborhood;
 pub mod rng;
 pub mod rule;
@@ -131,6 +133,50 @@ mod tests {
         assert_eq!(rule.shade(0), None);
         assert_eq!(rule.shade(1), Some(1.0));
         assert!(rule.shade(3).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn mesh_is_closed_and_faces_outward() {
+        let mut sim = Simulation::new(LifeLike::parse("/1/2/M").unwrap(), Dims::cube(10));
+        // A ball touching the grid edge, to check the surface closes at the boundary.
+        for z in 0..10 {
+            for y in 0..10 {
+                for x in 0..10 {
+                    let d = [x, y, z].map(|v| v as f32 + 0.5 - 4.0);
+                    if d.iter().map(|v| v * v).sum::<f32>() < 16.0 {
+                        sim.grid_mut().set(x, y, z, true);
+                    }
+                }
+            }
+        }
+        for smooth in [0, 1] {
+            let mut out = Vec::new();
+            let tris = sim.mesh(smooth, &mut out);
+            assert!(tris > 50);
+            assert_eq!(out.len(), tris * 3 * mesh::MESH_STRIDE);
+            let key = |v: &[f32]| [0, 1, 2].map(|k| (v[k] * 1024.0).round() as i64);
+            let mut edges = std::collections::HashMap::new();
+            for t in out.chunks(3 * mesh::MESH_STRIDE) {
+                let p: Vec<_> = t.chunks(mesh::MESH_STRIDE).map(key).collect();
+                for k in 0..3 {
+                    let (a, b) = (p[k], p[(k + 1) % 3]);
+                    if a != b {
+                        *edges
+                            .entry(if a < b { (a, b) } else { (b, a) })
+                            .or_insert(0) += 1;
+                    }
+                }
+            }
+            assert!(
+                edges.values().all(|&c| c % 2 == 0),
+                "open edges, smooth {smooth}"
+            );
+            let outward = out
+                .chunks(mesh::MESH_STRIDE)
+                .filter(|v| (0..3).map(|k| v[3 + k] * (v[k] - 4.0)).sum::<f32>() > 0.0)
+                .count();
+            assert_eq!(outward, tris * 3, "smooth {smooth}");
+        }
     }
 
     #[test]
@@ -269,5 +315,91 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(worst < 1e-4, "max difference {worst}");
         assert!(sim.population() > 0);
+    }
+
+    /// Rotating the model by 90 degrees about y must commute with rotating the grid:
+    /// step(rotate(state)) with the model rotated == rotate(step(state)).
+    fn check_quarter_turn_equivariance<const C: usize>(fixture: &str, extra: serde_json::Value)
+    where
+        [f32; C]: Default,
+    {
+        let f: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let mut weights = f["weights"].clone();
+        for (k, v) in extra.as_object().unwrap() {
+            weights[k] = v.clone();
+        }
+        let n = f["size"].as_u64().unwrap() as usize;
+        let input: Vec<f32> = serde_json::from_value(f["input"].clone()).unwrap();
+        let make = || {
+            let w = rules::NcaWeights::from_json(&weights.to_string()).unwrap();
+            Simulation::new(rules::NeuralCa::<C>::new(w).unwrap(), Dims::cube(n))
+        };
+        let d = Dims::cube(n);
+        // Quarter turn about +y: (x, z) -> (z, -x) around the center, matching rotation_matrix.
+        let turn = |x: usize, y: usize, z: usize| (z, y, n - 1 - x);
+        let load = |sim: &mut Simulation<rules::NeuralCa<C>>, rotate: bool| {
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        let i = d.index(x, y, z);
+                        let cell: [f32; C] = std::array::from_fn(|c| input[i * C + c]);
+                        let (a, b, c) = if rotate { turn(x, y, z) } else { (x, y, z) };
+                        sim.grid_mut().set(a, b, c, cell);
+                    }
+                }
+            }
+        };
+        let mut plain = make();
+        load(&mut plain, false);
+        plain.step();
+        let mut turned = make();
+        turned.set_orientation(std::f32::consts::FRAC_PI_2, 0.0, 0.0);
+        load(&mut turned, true);
+        turned.step();
+        let mut worst = 0.0f32;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let (a, b, c) = turn(x, y, z);
+                    let p = plain.grid().get(x, y, z);
+                    let q = turned.grid().get(a, b, c);
+                    worst = p
+                        .iter()
+                        .zip(&q)
+                        .map(|(u, v)| (u - v).abs())
+                        .fold(worst, f32::max);
+                }
+            }
+        }
+        assert!(worst < 1e-4, "max difference {worst}");
+    }
+
+    #[test]
+    fn neural_rotation_is_equivariant_default_kernels() {
+        check_quarter_turn_equivariance::<8>(
+            include_str!("../tests/fixtures/nca_step.json"),
+            serde_json::json!({}),
+        );
+    }
+
+    /// The PyTorch notebook's kernels: dx along x, its "dz" along y and "dy" along z,
+    /// both flipped in sign.
+    #[test]
+    fn neural_rotation_is_equivariant_notebook_kernels() {
+        check_quarter_turn_equivariance::<16>(
+            include_str!("../tests/fixtures/nca_torch_step.json"),
+            serde_json::json!({"gradient_kernels": [1, 3, 2], "gradient_signs": [1.0, -1.0, -1.0]}),
+        );
+    }
+
+    #[test]
+    fn rotation_matrix_quarter_turn_about_y() {
+        let r = rules::neural::rotation_matrix(std::f32::consts::FRAC_PI_2, 0.0, 0.0);
+        let want = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((r[i][j] - want[i][j]).abs() < 1e-6, "{r:?}");
+            }
+        }
     }
 }

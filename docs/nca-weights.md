@@ -30,6 +30,9 @@ reads a JSON file with this shape:
 | `kernels` | Perception kernels, each 27 values indexed `[dz][dy][dx]` (optional, default identity + Sobel/32). |
 | `feature_order` | `kernel_major` (default, `k*C + c`) or `channel_major` (`c*K + k`, PyTorch grouped conv). |
 | `boundary` | `wrap` (default, torus) or `zero` (PyTorch `padding=1`). |
+| `gradient_kernels` | Indices of the kernels holding the x, y and z gradients, so the model can be rotated (optional; `[1, 2, 3]` when `kernels` is absent, otherwise no rotation). |
+| `gradient_signs` | Sign of each gradient kernel relative to +x, +y, +z (optional, default `[1, 1, 1]`). The PyTorch notebook layout is `[1, -1, -1]` with `gradient_kernels` `[1, 3, 2]`. |
+| `rotation` | Orientations the model was trained for: `none`, `yaw` or `full` (optional, informational; the viewer shows tilt and roll only for `full`). |
 | `w1` | `H x K*C`, row-major (`K` = number of kernels). |
 | `b1` | `H`. |
 | `w2` | `C x H`, row-major. |
@@ -47,6 +50,12 @@ For each cell, with `x` the `C`-vector state and the grid wrapping at its edges:
 3. **Fire.** Apply `x += delta` with probability `fire_rate`.
 4. **Mask.** Zero cells whose 3x3x3 block has no alpha above `alive_threshold`, checked
    on the state before and after the update.
+
+When the viewer turns a model by a rotation `R`, each channel's gradient features
+`g = (gx, gy, gz)` (from `gradient_kernels`, times `gradient_signs`) are replaced by `R^T g`
+before step 2, and the seed position is turned by `R`. The firing decision for cell `i` at
+step `t` is `hash32(i ^ hash32(t ^ 0x9e3779b9)) >> 8 < fire_rate * 2^24` (lowbias32 hash),
+identical on the CPU and the WebGPU path.
 
 Axes: the grid is stored `[z][y][x]` and y is up in the viewer. In a PyTorch
 `(N, C, D, H, W)` tensor that means D = z, H = y, W = x.

@@ -21,6 +21,26 @@ void main() {
   vColor = aColor;
 }`;
 
+// Smooth-surface vertices, in grid coordinates: x, y, z, nx, ny, nz, shade, r, g, b, has_color.
+const MESH_VERT = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in float aShade;
+layout(location = 3) in vec4 aColor;
+uniform mat4 uViewProj;
+uniform float uSize;
+out vec3 vNormal;
+out vec3 vCell;
+out float vShade;
+out vec4 vColor;
+void main() {
+  gl_Position = uViewProj * vec4(aPos - vec3(uSize * 0.5), 1.0);
+  vNormal = aNormal;
+  vCell = aPos / uSize;
+  vShade = aShade;
+  vColor = aColor;
+}`;
+
 const FRAG = `#version 300 es
 precision highp float;
 in vec3 vNormal;
@@ -40,11 +60,12 @@ void main() {
     : vColor.a > 0.5 ? vColor.rgb
     : hsv(0.62 - 0.55 * vShade, 0.75, 0.35 + 0.65 * vShade);
   vec3 light = normalize(vec3(0.5, 0.8, 0.35));
-  float diff = 0.45 + 0.55 * max(dot(vNormal, light), 0.0);
+  float diff = 0.45 + 0.55 * max(dot(normalize(vNormal), light), 0.0);
   outColor = vec4(base * diff, 1.0);
 }`;
 
 const STRIDE = 8; // floats per instance
+const MESH_STRIDE = 11; // floats per smooth-surface vertex
 
 // 36 vertices of a unit cube centered on the origin: position then normal.
 function cubeVertices() {
@@ -71,6 +92,15 @@ function compile(gl, type, src) {
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
   return s;
+}
+
+function link(gl, vert, frag, uniforms) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, vert));
+  gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, frag));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  return { prog, u: Object.fromEntries(uniforms.map((n) => [n, gl.getUniformLocation(prog, n)])) };
 }
 
 const v3 = {
@@ -115,15 +145,11 @@ export class Renderer {
     this.preview = [];
     this.previewColor = [1, 1, 1, 0.35];
 
-    const prog = gl.createProgram();
-    gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERT));
-    gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FRAG));
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-    this.prog = prog;
-    this.u = Object.fromEntries(
-      ["uViewProj", "uSize", "uGap", "uColorMode", "uOverride"].map((n) => [n, gl.getUniformLocation(prog, n)]),
-    );
+    ({ prog: this.prog, u: this.u } = link(gl, VERT, FRAG, ["uViewProj", "uSize", "uGap", "uColorMode", "uOverride"]));
+    this.meshProg = link(gl, MESH_VERT, FRAG, ["uViewProj", "uSize", "uColorMode", "uOverride"]);
+    /** "cubes" draws instanced cells, "smooth" the marching-cubes mesh. */
+    this.mode = "cubes";
+    this.meshCount = 0;
 
     const cube = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, cube);
@@ -150,6 +176,18 @@ export class Renderer {
     this.cells = makeVao();
     this.brush = makeVao();
 
+    const meshVao = gl.createVertexArray();
+    const meshBuf = gl.createBuffer();
+    gl.bindVertexArray(meshVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+    const B = MESH_STRIDE * 4;
+    for (const [loc, size, offset] of [[0, 3, 0], [1, 3, 12], [2, 1, 24], [3, 4, 28]]) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, B, offset);
+    }
+    gl.bindVertexArray(null);
+    this.mesh = { vao: meshVao, buf: meshBuf };
+
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -161,6 +199,15 @@ export class Renderer {
     this.gridSize = gridSize;
     this.count = data.length / STRIDE;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cells.buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+  }
+
+  /** Uploads a smooth-surface triangle list (MESH_STRIDE floats per vertex). */
+  setMesh(data, gridSize) {
+    const gl = this.gl;
+    this.gridSize = gridSize;
+    this.meshCount = data.length / MESH_STRIDE;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.mesh.buf);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
   }
 
@@ -204,6 +251,17 @@ export class Renderer {
     const proj = mat4.perspective(FOV, w / Math.max(h, 1), 0.1, r * 4);
     const viewProj = mat4.mul(proj, mat4.lookAt(eye, [0, 0, 0], [0, 1, 0]));
 
+    if (this.mode === "smooth") {
+      const { prog, u } = this.meshProg;
+      gl.useProgram(prog);
+      gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
+      gl.uniform1f(u.uSize, this.gridSize);
+      gl.uniform1i(u.uColorMode, this.colorMode);
+      gl.uniform4f(u.uOverride, 0, 0, 0, 0);
+      gl.bindVertexArray(this.mesh.vao);
+      if (this.meshCount > 0) gl.drawArrays(gl.TRIANGLES, 0, this.meshCount);
+    }
+
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(this.u.uViewProj, false, viewProj);
     gl.uniform1f(this.u.uSize, this.gridSize);
@@ -211,7 +269,7 @@ export class Renderer {
     gl.uniform4f(this.u.uOverride, 0, 0, 0, 0);
     gl.uniform1f(this.u.uGap, this.gap);
     gl.bindVertexArray(this.cells.vao);
-    if (this.count > 0) gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.count);
+    if (this.mode === "cubes" && this.count > 0) gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, this.count);
 
     if (this.preview.length) {
       const data = new Float32Array(this.preview.length * STRIDE);
