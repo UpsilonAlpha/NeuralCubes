@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neural Cubes</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' rx='2' fill='%233a6ff0'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #f4f5f7; --panel: #ffffff; --text: #1c1f26; --muted: #5d6573; --border: #d9dde4;
+      --accent: #3a6ff0; --canvas-bg: #e9ecf1; --error: #c62f2f;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e1015; --panel: #161921; --text: #e6e8ee; --muted: #9098a8; --border: #2a2f3a;
+        --accent: #6d95ff; --canvas-bg: #0b0d12; --error: #ff7070;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { display: flex; height: 100%; }
+    #view { flex: 1; min-width: 0; position: relative; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    #stats { position: absolute; left: 12px; top: 10px; font: 12px/1.5 ui-monospace, monospace;
+      color: var(--muted); pointer-events: none; white-space: pre; }
+    aside { width: 300px; flex: none; overflow-y: auto; padding: 16px; background: var(--panel);
+      border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 14px; }
+    h1 { font-size: 17px; margin: 0; }
+    h1 + p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+    label > span { display: flex; justify-content: space-between; }
+    input[type=text], select { font: inherit; color: var(--text); background: var(--bg);
+      border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; }
+    input[type=text] { font-family: ui-monospace, monospace; }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    .row { display: flex; gap: 6px; }
+    button { flex: 1; font: inherit; padding: 7px 8px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    #error { color: var(--error); font-size: 12px; min-height: 1em; margin-top: -8px; }
+    details { font-size: 12px; color: var(--muted); }
+    details code { color: var(--text); }
+    @media (max-width: 720px) {
+      main { flex-direction: column; }
+      #view { flex: none; height: 60vh; }
+      aside { width: 100%; border-left: 0; border-top: 1px solid var(--border); flex: 1; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div id="view">
+    <canvas id="canvas"></canvas>
+    <div id="stats"></div>
+  </div>
+  <aside>
+    <div>
+      <h1>Neural Cubes</h1>
+      <p>3D cellular automata in Rust + WebAssembly. Drag to orbit, scroll or pinch to zoom.</p>
+    </div>
+    <label>Preset
+      <select id="preset"></select>
+    </label>
+    <label>Rule (survive / birth / states / neighborhood)
+      <div class="row">
+        <input id="rule" type="text" spellcheck="false" autocomplete="off">
+        <button id="apply" style="flex:none">Apply</button>
+      </div>
+    </label>
+    <div id="error"></div>
+    <div class="row">
+      <button id="play" class="primary">Pause</button>
+      <button id="step">Step</button>
+      <button id="reseed">Reseed</button>
+    </div>
+    <label><span>Speed <b id="speedOut"></b></span>
+      <input id="speed" type="range" min="1" max="60" value="10">
+    </label>
+    <label><span>Grid size <b id="sizeOut"></b></span>
+      <input id="size" type="range" min="16" max="128" step="8" value="48">
+    </label>
+    <label><span>Seed extent <b id="extentOut"></b></span>
+      <input id="extent" type="range" min="0.02" max="1" step="0.01" value="0.2">
+    </label>
+    <label><span>Seed density <b id="densityOut"></b></span>
+      <input id="density" type="range" min="0.01" max="1" step="0.01" value="0.5">
+    </label>
+    <label>Color
+      <select id="color">
+        <option value="0">By state (age)</option>
+        <option value="1">By position</option>
+      </select>
+    </label>
+    <details>
+      <summary>Rule notation</summary>
+      <p><code>S/B/C/N</code>: a live cell <b>survives</b> with a neighbor count in S, an empty cell is
+      <b>born</b> with a count in B, there are <b>C</b> states (2 is plain alive/dead; more adds decaying
+      states), and the neighborhood is <code>M</code> (26 surrounding cells) or <code>N</code> (6 face
+      neighbors). Counts are lists like <code>5-7,12</code>.</p>
+    </details>
+  </aside>
+</main>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
