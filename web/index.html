@@ -11,10 +11,14 @@
       --accent: #3a6ff0; --canvas-bg: #e9ecf1; --error: #c62f2f;
     }
     @media (prefers-color-scheme: dark) {
-      :root {
+      :root:not([data-theme="light"]) {
         --bg: #0e1015; --panel: #161921; --text: #e6e8ee; --muted: #9098a8; --border: #2a2f3a;
-        --accent: #6d95ff; --canvas-bg: #0b0d12; --error: #ff7070;
+        --accent: #6d95ff; --canvas-bg: #0b0d12; --error: #ff7070; color-scheme: dark;
       }
+    }
+    :root[data-theme="dark"] {
+        --bg: #0e1015; --panel: #161921; --text: #e6e8ee; --muted: #9098a8; --border: #2a2f3a;
+        --accent: #6d95ff; --canvas-bg: #0b0d12; --error: #ff7070; color-scheme: dark;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -23,9 +27,10 @@
     #view { flex: 1; min-width: 0; position: relative; }
     canvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
     canvas:active { cursor: grabbing; }
-    #stats { position: absolute; left: 12px; top: 10px; font: 12px/1.5 ui-monospace, monospace;
+    #stats { position: absolute; left: max(12px, env(safe-area-inset-left, 0px)); top: 10px; font: 12px/1.5 ui-monospace, monospace;
       color: var(--muted); pointer-events: none; white-space: pre; }
-    aside { width: 300px; flex: none; overflow-y: auto; padding: 16px; background: var(--panel);
+    aside { width: 300px; flex: none; overflow-y: auto; padding-block: 16px;
+      padding-left: 16px; padding-right: max(16px, env(safe-area-inset-right, 0px)); background: var(--panel);
       border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 14px; }
     h1 { font-size: 17px; margin: 0; }
     h1 + p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
@@ -51,7 +56,8 @@
     @media (max-width: 720px) {
       main { flex-direction: column; }
       #view { flex: none; height: 60vh; }
-      aside { width: 100%; border-left: 0; border-top: 1px solid var(--border); flex: 1; }
+      aside { width: 100%; border-left: 0; border-top: 1px solid var(--border); flex: 1;
+        padding-left: max(16px, env(safe-area-inset-left, 0px)); }
     }
   </style>
 </head>

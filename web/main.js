@@ -40,7 +40,7 @@ function writeHash() {
   const p = model && !model.local
     ? new URLSearchParams({ model: model.name, size: universe.size() })
     : new URLSearchParams({ rule: universe.notation(), size: universe.size() });
-  history.replaceState(null, "", "#" + p);
+  try { history.replaceState(null, "", "#" + p); } catch { /* sandboxed viewers may refuse */ }
 }
 
 // ---- building universes ----
