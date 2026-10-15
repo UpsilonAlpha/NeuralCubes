@@ -164,6 +164,7 @@ What the settings do, and why they're the defaults:
 | Setting | Default | Why |
 |---|---|---|
 | `--size 32` | 32³ grid | Room for ears, branches and arms; about 24 voxels across the shape. |
+| `--margin 3` | 3 cells | Every preset is scaled so it stays at least this far from the grid edge at *every* orientation it trains in (a 45° turn makes a shape wider, and `full` rotation needs the most room). The log's first line reports how far the shape reaches. A `.npy` target that doesn't fit is rejected instead of silently cut off. With `--rotation full`, use `SIZE=40` to keep shapes large. |
 | `--iterations 8000` | | The Distill paper's budget. Fewer leaves the shape unstable over long runs. |
 | `--batch 8 --pool 256` | | Samples come from a pool and go back after each step, so the model trains on states it grew itself, including old ones. This is what teaches it to *stop* growing. |
 | `--min-steps 64 --max-steps 96` | | Long rollouts per iteration; short ones grow the shape but don't hold it. |

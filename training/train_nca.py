@@ -222,14 +222,44 @@ def export(params, cfg, path):
     os.replace(tmp, path)
 
 
-def load_target(spec, size, fit):
+def reach(target, rotation):
+    """How far the filled voxels reach from the grid center, the way they can be turned:
+    the bounding box for `none`, the horizontal radius for `yaw`, the full radius for `full`."""
+    n = target.shape[0]
+    p = np.argwhere(target[..., ALPHA] > 0.5) - (n - 1) / 2  # [z, y, x] offsets
+    if rotation == "none":
+        return float(np.abs(p).max()) + 0.5
+    if rotation == "yaw":
+        return float(max(np.hypot(p[:, 0], p[:, 2]).max(), np.abs(p[:, 1]).max())) + 0.5
+    return float(np.sqrt((p ** 2).sum(1)).max()) + 0.5
+
+
+def load_target(spec, size, fit, rotation, margin):
+    """The training target, with at least `margin` empty cells to every grid edge at every
+    orientation it will be trained in. Presets are scaled down to fit; a .npy target that
+    doesn't fit is an error, since cells past the edge would be cut off (or wrap around)."""
     if spec.endswith(".npy"):
-        return np.load(spec)
+        target = np.load(spec)
+        room = target.shape[0] / 2 - margin
+        if reach(target, rotation) > room:
+            raise SystemExit(
+                f"{spec}: the shape reaches {reach(target, rotation):.1f} cells from the center with "
+                f"--rotation {rotation}, but only {room:.1f} leaves a {margin}-cell margin in a "
+                f"{target.shape[0]}^3 grid. Rebuild it with a smaller --fit or a bigger --size.")
+        return target
     import targets
 
     if spec not in targets.PRESETS:
         raise SystemExit(f"unknown target {spec!r}; presets: {', '.join(targets.PRESETS)}")
-    return targets.to_rgba(*targets.PRESETS[spec][0](size, fit or size - 6))
+    make = lambda f: targets.to_rgba(*targets.PRESETS[spec][0](size, f))
+    fit = fit or size - 2 * margin
+    room = size / 2 - margin
+    target = make(fit)
+    # Shrink until the turned shape keeps its margin (a 45-degree turn makes a box wider).
+    while reach(target, rotation) > room and fit > 4:
+        fit = max(4, min(fit - 1, int(fit * room / reach(target, rotation))))
+        target = make(fit)
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +271,9 @@ def main():
     ap.add_argument("--out", required=True, help="weights JSON to write")
     ap.add_argument("--name", help="model name shown in the viewer (default: target name)")
     ap.add_argument("--size", type=int, default=24, help="grid edge for preset targets")
-    ap.add_argument("--fit", type=int, help="shape size in voxels for preset targets")
+    ap.add_argument("--fit", type=int, help="shape size in voxels for preset targets (shrunk if needed to keep --margin)")
+    ap.add_argument("--margin", type=int, default=3,
+                    help="empty cells kept between the shape and the grid edge at every training orientation")
     ap.add_argument("--channels", type=int, default=16)
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--iterations", type=int, default=3000)
@@ -270,7 +302,11 @@ def main():
         ap.error("--damage must be less than --batch (one sample per batch is reset to the seed)")
     print("devices:", jax.devices(), flush=True)
 
-    target_np = load_target(args.target, args.size, args.fit).astype(np.float32)
+    target_np = load_target(args.target, args.size, args.fit, args.rotation, args.margin).astype(np.float32)
+    n = target_np.shape[0]
+    print(f"target: {int((target_np[..., ALPHA] > 0.5).sum())} voxels in {n}^3, reaching "
+          f"{reach(target_np, args.rotation):.1f} of {n / 2:.0f} cells from the center "
+          f"with --rotation {args.rotation}", flush=True)
     target = jnp.asarray(target_np)
     size = target.shape[0]
     filled = np.argwhere(target_np[..., ALPHA] > 0.5)

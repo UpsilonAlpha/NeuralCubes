@@ -213,6 +213,11 @@ def main():
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     np.save(out, target)
     print(f"{out}: {int((target[..., 3] > 0.5).sum())} filled voxels in a {args.size}^3 grid")
+    p = np.argwhere(target[..., 3] > 0.5) - (args.size - 1) / 2
+    print(f"reaches {np.abs(p).max() + 0.5:.1f} cells from the center upright, "
+          f"{max(np.hypot(p[:, 0], p[:, 2]).max(), np.abs(p[:, 1]).max()) + 0.5:.1f} at any yaw, "
+          f"{np.sqrt((p ** 2).sum(1)).max() + 0.5:.1f} at any orientation (half the grid is {args.size / 2:g}); "
+          "train_nca.py needs --margin cells to spare")
     if args.preview:
         preview(target)
 
