@@ -16,9 +16,16 @@ impl LifeLike {
     pub fn parse(s: &str) -> Result<Self, ParseError> {
         let t = Totalistic::parse(s)?;
         if t.states != 2 {
-            return Err(ParseError(format!("life-like rules have 2 states, `{s}` has {}", t.states)));
+            return Err(ParseError(format!(
+                "life-like rules have 2 states, `{s}` has {}",
+                t.states
+            )));
         }
-        Ok(Self { survive: t.survive, birth: t.birth, neighborhood: t.neighborhood })
+        Ok(Self {
+            survive: t.survive,
+            birth: t.birth,
+            neighborhood: t.neighborhood,
+        })
     }
 }
 
@@ -26,8 +33,13 @@ impl Rule for LifeLike {
     type Cell = bool;
 
     fn notation(&self) -> String {
-        Totalistic { survive: self.survive, birth: self.birth, states: 2, neighborhood: self.neighborhood }
-            .notation()
+        Totalistic {
+            survive: self.survive,
+            birth: self.birth,
+            states: 2,
+            neighborhood: self.neighborhood,
+        }
+        .notation()
     }
 
     fn family(&self) -> &'static str {

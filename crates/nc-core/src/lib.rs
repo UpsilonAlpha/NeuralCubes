@@ -52,7 +52,9 @@ mod tests {
     #[test]
     fn count_sets_parse_and_print() {
         let s = CountSet::parse("5-7, 12,13", 26).unwrap();
-        assert!(s.contains(5) && s.contains(6) && s.contains(7) && s.contains(12) && s.contains(13));
+        assert!(
+            s.contains(5) && s.contains(6) && s.contains(7) && s.contains(12) && s.contains(13)
+        );
         assert!(!s.contains(8));
         assert_eq!(s.to_string(), "5-7,12,13");
         assert!(CountSet::parse("27", 26).is_err());
@@ -64,9 +66,15 @@ mod tests {
     #[test]
     fn notation_round_trips_and_picks_family() {
         let a = from_notation("4/4/5/M", Dims::cube(4)).unwrap();
-        assert_eq!((a.family(), a.notation().as_str()), ("generations", "4/4/5/M"));
+        assert_eq!(
+            (a.family(), a.notation().as_str()),
+            ("generations", "4/4/5/M")
+        );
         let b = from_notation(" 9-26 / 5-7,12-13,15 / 2 / m ", Dims::cube(4)).unwrap();
-        assert_eq!((b.family(), b.notation().as_str()), ("life-like", "9-26/5-7,12,13,15/2/M"));
+        assert_eq!(
+            (b.family(), b.notation().as_str()),
+            ("life-like", "9-26/5-7,12,13,15/2/M")
+        );
         assert!(from_notation("4/4/M", Dims::cube(4)).is_err());
         assert!(from_notation("4/4/1/M", Dims::cube(4)).is_err());
         assert!(from_notation("4/4/5/X", Dims::cube(4)).is_err());
@@ -76,7 +84,9 @@ mod tests {
     fn neighborhood_shapes() {
         assert_eq!(Neighborhood::Moore.size(), 26);
         assert_eq!(Neighborhood::VonNeumann.size(), 6);
-        assert!(!Neighborhood::Moore.block_indices().contains(&neighborhood::CENTER));
+        assert!(!Neighborhood::Moore
+            .block_indices()
+            .contains(&neighborhood::CENTER));
     }
 
     #[test]
@@ -86,7 +96,14 @@ mod tests {
         sim.step();
         let g = sim.grid();
         assert!(!g.get(2, 2, 2));
-        for (x, y, z) in [(1, 2, 2), (3, 2, 2), (2, 1, 2), (2, 3, 2), (2, 2, 1), (2, 2, 3)] {
+        for (x, y, z) in [
+            (1, 2, 2),
+            (3, 2, 2),
+            (2, 1, 2),
+            (2, 3, 2),
+            (2, 2, 1),
+            (2, 2, 3),
+        ] {
             assert!(g.get(x, y, z));
         }
         assert_eq!(sim.population(), 6);
@@ -136,14 +153,20 @@ mod tests {
     fn seeding_is_deterministic_and_centered() {
         let mut a = from_notation("4/4/5/M", Dims::cube(20)).unwrap();
         let mut b = from_notation("4/4/5/M", Dims::cube(20)).unwrap();
-        let s = Seeding { extent: 0.5, density: 0.5, seed: 7 };
+        let s = Seeding {
+            extent: 0.5,
+            density: 0.5,
+            seed: 7,
+        };
         a.seed(s);
         b.seed(s);
         let (mut sa, mut sb) = (vec![], vec![]);
         a.surface(&mut sa);
         b.surface(&mut sb);
         assert_eq!(sa, sb);
-        assert!(sa.chunks(8).all(|c| (5.0..15.0).contains(&c[0]) && (5.0..15.0).contains(&c[2])));
+        assert!(sa
+            .chunks(8)
+            .all(|c| (5.0..15.0).contains(&c[0]) && (5.0..15.0).contains(&c[2])));
         let n = a.population() as f32;
         assert!((400.0..600.0).contains(&n), "population {n}");
     }
@@ -155,10 +178,22 @@ mod tests {
         sim.grid_mut().set(6, 4, 4, true);
         // From outside along +x through the row y=4, z=4.
         let hit = sim.raycast([-3.0, 4.5, 4.5], [1.0, 0.0, 0.0]).unwrap();
-        assert_eq!(hit, Hit { cell: [4, 4, 4], normal: [-1, 0, 0] });
+        assert_eq!(
+            hit,
+            Hit {
+                cell: [4, 4, 4],
+                normal: [-1, 0, 0]
+            }
+        );
         // From above, diagonally down onto the top face of (6, 4, 4).
         let hit = sim.raycast([6.5, 20.0, 4.5], [0.0, -1.0, 0.0]).unwrap();
-        assert_eq!(hit, Hit { cell: [6, 4, 4], normal: [0, 1, 0] });
+        assert_eq!(
+            hit,
+            Hit {
+                cell: [6, 4, 4],
+                normal: [0, 1, 0]
+            }
+        );
         assert_eq!(sim.raycast([-3.0, 1.5, 1.5], [1.0, 0.0, 0.0]), None);
         assert_eq!(sim.raycast([-3.0, 4.5, 4.5], [-1.0, 0.0, 0.0]), None);
     }
@@ -184,7 +219,8 @@ mod tests {
             input: Vec<f32>,
             output: Vec<f32>,
         }
-        let f: Fixture = serde_json::from_str(include_str!("../tests/fixtures/nca_step.json")).unwrap();
+        let f: Fixture =
+            serde_json::from_str(include_str!("../tests/fixtures/nca_step.json")).unwrap();
         let w = rules::NcaWeights::from_json(&f.weights.to_string()).unwrap();
         let mut sim = Simulation::new(rules::NeuralCa::<8>::new(w).unwrap(), Dims::cube(f.size));
         for (cell, chunk) in sim.grid_mut().cells_mut().iter_mut().zip(f.input.chunks(8)) {
@@ -192,7 +228,11 @@ mod tests {
         }
         sim.step();
         let got: Vec<f32> = sim.grid().cells().iter().flatten().copied().collect();
-        let worst = got.iter().zip(&f.output).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let worst = got
+            .iter()
+            .zip(&f.output)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
         assert!(worst < 1e-4, "max difference {worst}");
         assert!(sim.population() > 0);
     }
@@ -208,15 +248,25 @@ mod tests {
             input: Vec<f32>,
             output: Vec<f32>,
         }
-        let f: Fixture = serde_json::from_str(include_str!("../tests/fixtures/nca_torch_step.json")).unwrap();
+        let f: Fixture =
+            serde_json::from_str(include_str!("../tests/fixtures/nca_torch_step.json")).unwrap();
         let w = rules::NcaWeights::from_json(&f.weights.to_string()).unwrap();
         let mut sim = Simulation::new(rules::NeuralCa::<16>::new(w).unwrap(), Dims::cube(f.size));
-        for (cell, chunk) in sim.grid_mut().cells_mut().iter_mut().zip(f.input.chunks(16)) {
+        for (cell, chunk) in sim
+            .grid_mut()
+            .cells_mut()
+            .iter_mut()
+            .zip(f.input.chunks(16))
+        {
             cell.copy_from_slice(chunk);
         }
         sim.step();
         let got: Vec<f32> = sim.grid().cells().iter().flatten().copied().collect();
-        let worst = got.iter().zip(&f.output).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let worst = got
+            .iter()
+            .zip(&f.output)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
         assert!(worst < 1e-4, "max difference {worst}");
         assert!(sim.population() > 0);
     }

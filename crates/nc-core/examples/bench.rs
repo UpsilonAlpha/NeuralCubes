@@ -8,7 +8,11 @@ fn main() {
     let rule = args.next().unwrap_or_else(|| "4/4/5/M".into());
     let size: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(64);
     let mut sim = from_notation(&rule, Dims::cube(size)).expect("valid rule");
-    sim.seed(Seeding { extent: 0.5, density: 0.5, seed: 1 });
+    sim.seed(Seeding {
+        extent: 0.5,
+        density: 0.5,
+        seed: 1,
+    });
     let steps = 50;
     let t = Instant::now();
     for _ in 0..steps {

@@ -91,7 +91,10 @@ pub struct StepContext {
 
 impl StepContext {
     pub fn new(dims: Dims) -> Self {
-        Self { wrap: Wrap::new(dims), generation: 0 }
+        Self {
+            wrap: Wrap::new(dims),
+            generation: 0,
+        }
     }
 
     /// Neighbors of `(x, y, z)` in `grid`, for rules that override [`Rule::step`].

@@ -17,7 +17,11 @@ pub struct Seeding {
 
 impl Default for Seeding {
     fn default() -> Self {
-        Self { extent: 0.25, density: 0.5, seed: 1 }
+        Self {
+            extent: 0.25,
+            density: 0.5,
+            seed: 1,
+        }
     }
 }
 
@@ -107,13 +111,22 @@ fn ball(d: Dims, center: [f32; 3], radius: f32) -> impl Iterator<Item = (usize, 
         let hi = ((c + r).ceil().max(0.0) as usize).min(n);
         lo..hi
     };
-    let (rx, ry, rz) = (range(center[0], d.x), range(center[1], d.y), range(center[2], d.z));
+    let (rx, ry, rz) = (
+        range(center[0], d.x),
+        range(center[1], d.y),
+        range(center[2], d.z),
+    );
     rz.flat_map(move |z| {
         let rx = rx.clone();
-        ry.clone().flat_map(move |y| rx.clone().map(move |x| (x, y, z)))
+        ry.clone()
+            .flat_map(move |y| rx.clone().map(move |x| (x, y, z)))
     })
     .filter(move |&(x, y, z)| {
-        let p = [x as f32 + 0.5 - center[0], y as f32 + 0.5 - center[1], z as f32 + 0.5 - center[2]];
+        let p = [
+            x as f32 + 0.5 - center[0],
+            y as f32 + 0.5 - center[1],
+            z as f32 + 0.5 - center[2],
+        ];
         p[0] * p[0] + p[1] * p[1] + p[2] * p[2] <= r * r
     })
 }
@@ -151,19 +164,26 @@ impl<R: Rule> Automaton for Simulation<R> {
     }
 
     fn population(&self) -> usize {
-        self.front.cells().iter().filter(|&&c| self.rule.shade(c).is_some()).count()
+        self.front
+            .cells()
+            .iter()
+            .filter(|&&c| self.rule.shade(c).is_some())
+            .count()
     }
 
     fn surface(&self, out: &mut Vec<f32>) -> usize {
         let d = self.dims();
         let cells = self.front.cells();
-        let filled = |x: usize, y: usize, z: usize| self.rule.shade(cells[d.index(x, y, z)]).is_some();
+        let filled =
+            |x: usize, y: usize, z: usize| self.rule.shade(cells[d.index(x, y, z)]).is_some();
         let mut n = 0;
         for z in 0..d.z {
             for y in 0..d.y {
                 for x in 0..d.x {
                     let cell = cells[d.index(x, y, z)];
-                    let Some(shade) = self.rule.shade(cell) else { continue };
+                    let Some(shade) = self.rule.shade(cell) else {
+                        continue;
+                    };
                     // Cells on the grid boundary are always visible.
                     let buried = x > 0
                         && y > 0
@@ -182,7 +202,9 @@ impl<R: Rule> Automaton for Simulation<R> {
                             Some(c) => (c, 1.0),
                             None => ([0.0; 3], 0.0),
                         };
-                        out.extend_from_slice(&[x as f32, y as f32, z as f32, shade, rgb[0], rgb[1], rgb[2], has]);
+                        out.extend_from_slice(&[
+                            x as f32, y as f32, z as f32, shade, rgb[0], rgb[1], rgb[2], has,
+                        ]);
                         n += 1;
                     }
                 }
@@ -221,7 +243,13 @@ impl<R: Rule> Automaton for Simulation<R> {
         let p = [0, 1, 2].map(|a| origin[a] + dir[a] * (t0 + 1e-4));
         let mut cell = [0, 1, 2].map(|a| (p[a].floor() as isize).clamp(0, size[a] as isize - 1));
         let step = [0, 1, 2].map(|a| if dir[a] > 0.0 { 1isize } else { -1 });
-        let delta = [0, 1, 2].map(|a| if dir[a] != 0.0 { (1.0 / dir[a]).abs() } else { f32::INFINITY });
+        let delta = [0, 1, 2].map(|a| {
+            if dir[a] != 0.0 {
+                (1.0 / dir[a]).abs()
+            } else {
+                f32::INFINITY
+            }
+        });
         let mut next = [0, 1, 2].map(|a| {
             if dir[a] == 0.0 {
                 f32::INFINITY
@@ -237,10 +265,17 @@ impl<R: Rule> Automaton for Simulation<R> {
         loop {
             let [x, y, z] = cell.map(|c| c as usize);
             if self.filled(x, y, z) {
-                return Some(Hit { cell: [x, y, z], normal });
+                return Some(Hit {
+                    cell: [x, y, z],
+                    normal,
+                });
             }
             let a = if next[0] < next[1] {
-                if next[0] < next[2] { 0 } else { 2 }
+                if next[0] < next[2] {
+                    0
+                } else {
+                    2
+                }
             } else if next[1] < next[2] {
                 1
             } else {
@@ -270,7 +305,9 @@ impl<R: Rule> Automaton for Simulation<R> {
 
     fn fill(&mut self, center: [f32; 3], radius: f32) -> usize {
         let d = self.dims();
-        let targets: Vec<_> = ball(d, center, radius).filter(|&(x, y, z)| !self.filled(x, y, z)).collect();
+        let targets: Vec<_> = ball(d, center, radius)
+            .filter(|&(x, y, z)| !self.filled(x, y, z))
+            .collect();
         // Decide every new cell from the grid as it was, so the brush result doesn't
         // depend on iteration order.
         let snapshot = self.front.clone();

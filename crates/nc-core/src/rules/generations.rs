@@ -17,7 +17,12 @@ pub struct Generations {
 impl Generations {
     pub fn parse(s: &str) -> Result<Self, ParseError> {
         let t = Totalistic::parse(s)?;
-        Ok(Self { survive: t.survive, birth: t.birth, states: t.states, neighborhood: t.neighborhood })
+        Ok(Self {
+            survive: t.survive,
+            birth: t.birth,
+            states: t.states,
+            neighborhood: t.neighborhood,
+        })
     }
 }
 

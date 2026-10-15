@@ -24,7 +24,9 @@ impl CountSet {
                     .parse::<u32>()
                     .ok()
                     .filter(|&n| n <= max)
-                    .ok_or_else(|| ParseError(format!("`{t}` is not a neighbor count in 0..={max}")))
+                    .ok_or_else(|| {
+                        ParseError(format!("`{t}` is not a neighbor count in 0..={max}"))
+                    })
             };
             let (lo, hi) = match part.split_once('-') {
                 Some((a, b)) => (num(a)?, num(b)?),

@@ -46,18 +46,24 @@ impl Totalistic {
     pub fn parse(s: &str) -> Result<Self, ParseError> {
         let parts: Vec<&str> = s.trim().split('/').map(str::trim).collect();
         let [survive, birth, states, hood] = parts[..] else {
-            return Err(ParseError(format!("expected S/B/C/N (e.g. 4/4/5/M), got `{s}`")));
+            return Err(ParseError(format!(
+                "expected S/B/C/N (e.g. 4/4/5/M), got `{s}`"
+            )));
         };
         let neighborhood = match hood.to_ascii_uppercase().as_str() {
             "M" => Neighborhood::Moore,
             "N" | "VN" => Neighborhood::VonNeumann,
-            other => return Err(ParseError(format!("unknown neighborhood `{other}`; use M or N"))),
+            other => {
+                return Err(ParseError(format!(
+                    "unknown neighborhood `{other}`; use M or N"
+                )))
+            }
         };
-        let states: u8 = states
-            .parse()
-            .ok()
-            .filter(|&c| c >= 2)
-            .ok_or_else(|| ParseError(format!("state count must be an integer from 2 to 255, got `{states}`")))?;
+        let states: u8 = states.parse().ok().filter(|&c| c >= 2).ok_or_else(|| {
+            ParseError(format!(
+                "state count must be an integer from 2 to 255, got `{states}`"
+            ))
+        })?;
         let max = neighborhood.size() as u32;
         Ok(Self {
             survive: CountSet::parse(survive, max)?,
@@ -68,6 +74,12 @@ impl Totalistic {
     }
 
     pub fn notation(&self) -> String {
-        format!("{}/{}/{}/{}", self.survive, self.birth, self.states, self.neighborhood.letter())
+        format!(
+            "{}/{}/{}/{}",
+            self.survive,
+            self.birth,
+            self.states,
+            self.neighborhood.letter()
+        )
     }
 }

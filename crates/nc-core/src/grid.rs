@@ -56,7 +56,10 @@ pub struct Grid<C> {
 
 impl<C: Copy + Default> Grid<C> {
     pub fn new(dims: Dims) -> Self {
-        Self { dims, cells: vec![C::default(); dims.len()] }
+        Self {
+            dims,
+            cells: vec![C::default(); dims.len()],
+        }
     }
 
     pub fn dims(&self) -> Dims {

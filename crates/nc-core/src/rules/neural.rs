@@ -82,7 +82,8 @@ pub struct NcaWeights {
 
 impl NcaWeights {
     pub fn from_json(json: &str) -> Result<Self, ParseError> {
-        let w: Self = serde_json::from_str(json).map_err(|e| ParseError(format!("bad NCA weights: {e}")))?;
+        let w: Self =
+            serde_json::from_str(json).map_err(|e| ParseError(format!("bad NCA weights: {e}")))?;
         let (c, h, k) = (w.channels, w.hidden, w.kernel_count());
         let checks = [
             ("w1", w.w1.len(), h * k * c),
@@ -93,14 +94,22 @@ impl NcaWeights {
         ];
         for (name, got, want) in checks {
             if got != want {
-                return Err(ParseError(format!("NCA weights: `{name}` has {got} values, expected {want}")));
+                return Err(ParseError(format!(
+                    "NCA weights: `{name}` has {got} values, expected {want}"
+                )));
             }
         }
         if let Some(bad) = w.kernels.iter().flatten().find(|k| k.len() != 27) {
-            return Err(ParseError(format!("NCA weights: kernels need 27 values each, got {}", bad.len())));
+            return Err(ParseError(format!(
+                "NCA weights: kernels need 27 values each, got {}",
+                bad.len()
+            )));
         }
         if c <= ALPHA {
-            return Err(ParseError(format!("NCA needs at least {} channels, got {c}", ALPHA + 1)));
+            return Err(ParseError(format!(
+                "NCA needs at least {} channels, got {c}",
+                ALPHA + 1
+            )));
         }
         Ok(w)
     }
@@ -140,7 +149,10 @@ where
 {
     pub fn new(weights: NcaWeights) -> Result<Self, ParseError> {
         if weights.channels != C {
-            return Err(ParseError(format!("weights have {} channels, expected {C}", weights.channels)));
+            return Err(ParseError(format!(
+                "weights have {} channels, expected {C}",
+                weights.channels
+            )));
         }
         // Kernels in the file are indexed [dz][dy][dx], which is exactly block order.
         let kernels: Vec<[f32; 27]> = match &weights.kernels {
@@ -149,13 +161,23 @@ where
         };
         let taps = kernels
             .iter()
-            .map(|k| k.iter().enumerate().filter(|(_, w)| **w != 0.0).map(|(i, w)| (i, *w)).collect())
+            .map(|k| {
+                k.iter()
+                    .enumerate()
+                    .filter(|(_, w)| **w != 0.0)
+                    .map(|(i, w)| (i, *w))
+                    .collect()
+            })
             .collect();
         let seed = match &weights.seed_state {
             Some(s) => std::array::from_fn(|c| s[c]),
             None => std::array::from_fn(|c| if c >= ALPHA { 1.0 } else { 0.0 }),
         };
-        Ok(Self { weights, taps, seed })
+        Ok(Self {
+            weights,
+            taps,
+            seed,
+        })
     }
 
     /// The state a seed cell starts in.
@@ -164,7 +186,14 @@ where
     }
 
     /// The 3x3x3 block around `(x, y, z)`, honoring the boundary mode.
-    fn block(&self, grid: &Grid<[f32; C]>, ctx: &StepContext, x: usize, y: usize, z: usize) -> [[f32; C]; 27] {
+    fn block(
+        &self,
+        grid: &Grid<[f32; C]>,
+        ctx: &StepContext,
+        x: usize,
+        y: usize,
+        z: usize,
+    ) -> [[f32; C]; 27] {
         let d = grid.dims();
         let interior = x > 0 && y > 0 && z > 0 && x + 1 < d.x && y + 1 < d.y && z + 1 < d.z;
         if interior || self.weights.boundary == Boundary::Wrap {
@@ -188,25 +217,35 @@ where
         feats.fill(0.0);
         for (k, taps) in self.taps.iter().enumerate() {
             for &(j, kw) in taps {
-                for c in 0..C {
+                for (c, v) in block[j].iter().enumerate() {
                     let f = match w.feature_order {
                         FeatureOrder::KernelMajor => k * C + c,
                         FeatureOrder::ChannelMajor => c * kn + k,
                     };
-                    feats[f] += kw * block[j][c];
+                    feats[f] += kw * v;
                 }
             }
         }
         let n = kn * C;
         for (h, out) in hidden.iter_mut().enumerate() {
             let row = &w.w1[h * n..(h + 1) * n];
-            let v = w.b1[h] + row.iter().zip(feats.iter()).map(|(a, b)| a * b).sum::<f32>();
+            let v = w.b1[h]
+                + row
+                    .iter()
+                    .zip(feats.iter())
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>();
             *out = v.max(0.0);
         }
         let mut cell = block[CENTER];
         for (c, v) in cell.iter_mut().enumerate() {
             let row = &w.w2[c * w.hidden..(c + 1) * w.hidden];
-            *v += w.b2[c] + row.iter().zip(hidden.iter()).map(|(a, b)| a * b).sum::<f32>();
+            *v += w.b2[c]
+                + row
+                    .iter()
+                    .zip(hidden.iter())
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>();
         }
         cell
     }
@@ -242,7 +281,10 @@ where
                 own[d.index(a, b, c)]
             } else {
                 let inside = |v: isize, n: usize| v >= 0 && v < n as isize;
-                inside(nx, d.x) && inside(ny, d.y) && inside(nz, d.z) && own[d.index(nx as usize, ny as usize, nz as usize)]
+                inside(nx, d.x)
+                    && inside(ny, d.y)
+                    && inside(nz, d.z)
+                    && own[d.index(nx as usize, ny as usize, nz as usize)]
             }
         })
     }
@@ -260,7 +302,11 @@ where
     type Cell = [f32; C];
 
     fn notation(&self) -> String {
-        let name = if self.weights.name.is_empty() { "model" } else { &self.weights.name };
+        let name = if self.weights.name.is_empty() {
+            "model"
+        } else {
+            &self.weights.name
+        };
         format!("nca:{name}")
     }
 
@@ -318,7 +364,9 @@ where
         let d = grid.dims();
         let train = self.weights.grid.unwrap_or(d.x);
         let [sz, sy, sx] = self.weights.seed.unwrap_or([train / 2; 3]);
-        let shift = |v: usize, n: usize| (v as isize + (n as isize - train as isize) / 2).clamp(0, n as isize - 1) as usize;
+        let shift = |v: usize, n: usize| {
+            (v as isize + (n as isize - train as isize) / 2).clamp(0, n as isize - 1) as usize
+        };
         grid.set(shift(sx, d.x), shift(sy, d.y), shift(sz, d.z), self.seed);
     }
 

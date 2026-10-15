@@ -17,7 +17,11 @@ pub const BLOCK_OFFSETS: [[i8; 3]; 27] = {
     let mut out = [[0i8; 3]; 27];
     let mut i = 0;
     while i < 27 {
-        out[i] = [(i % 3) as i8 - 1, ((i / 3) % 3) as i8 - 1, (i / 9) as i8 - 1];
+        out[i] = [
+            (i % 3) as i8 - 1,
+            ((i / 3) % 3) as i8 - 1,
+            (i / 9) as i8 - 1,
+        ];
         i += 1;
     }
     out
@@ -95,7 +99,10 @@ impl<'a, C: Copy> Neighbors<'a, C> {
     /// The neighbors in this rule's neighborhood shape (excluding the center).
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = C> + '_ {
-        self.shape.block_indices().iter().map(move |&b| self.cells[self.block[b]])
+        self.shape
+            .block_indices()
+            .iter()
+            .map(move |&b| self.cells[self.block[b]])
     }
 
     /// Number of neighbors matching `pred`.
@@ -123,7 +130,12 @@ impl Wrap {
         let axis = |n: usize| -> Vec<[usize; 3]> {
             (0..n).map(|i| [(i + n - 1) % n, i, (i + 1) % n]).collect()
         };
-        Self { dims, xs: axis(dims.x), ys: axis(dims.y), zs: axis(dims.z) }
+        Self {
+            dims,
+            xs: axis(dims.x),
+            ys: axis(dims.y),
+            zs: axis(dims.z),
+        }
     }
 
     #[inline]
@@ -147,6 +159,10 @@ impl Wrap {
                 }
             }
         }
-        Neighbors { cells: grid.cells(), block, shape }
+        Neighbors {
+            cells: grid.cells(),
+            block,
+            shape,
+        }
     }
 }
