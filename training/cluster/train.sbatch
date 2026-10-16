@@ -7,13 +7,14 @@
 # Edit the #SBATCH lines for your cluster (partition, account, time limit). Jobs write
 # checkpoints, so a preempted or timed-out job picks up where it stopped when resubmitted
 # (--requeue does that automatically where the cluster allows it).
-#SBATCH --job-name=nca
-#SBATCH --gres=gpu:1
+#SBATCH --qos=gpu
+#SBATCH --partition=gpu_cuda
+#SBATCH --gres=gpu
+#SBATCH --account=a_imb_ccbcd
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --time=04:00:00
-#SBATCH --requeue
-#SBATCH --output=logs/%x-%A_%a.out
+#SBATCH --mem=32G
+#SBATCH -o /scratch/user/uquadhik/NeuralCubes/training/logs/%x-%j.out
+#SBATCH -e /scratch/user/uquadhik/NeuralCubes/training/logs/%x-%j.err
 
 set -euo pipefail
 

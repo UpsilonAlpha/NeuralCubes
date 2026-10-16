@@ -1,3 +1,9 @@
 [
-  { "model": "bunny", "label": "Bunny (neural CA, regenerates)" }
+  { "model": "bunny", "label": "Bunny (neural CA, regenerates)" },
+  { "model": "tree", "label": "Tree" },
+  { "model": "cactus", "label": "Cactus" },
+  { "model": "mushroom", "label": "Mushroom" },
+  { "model": "torus", "label": "Torus" },
+  { "model": "sphere", "label": "Sphere" }
+  
 ]
